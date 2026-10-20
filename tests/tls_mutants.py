@@ -961,6 +961,20 @@ MUTANTS = [
         "        if false {",
         UNIT, "the_hybrid_by_default_and_x25519_as_its_fallback", [],
     ),
+    (
+        "csr: signature not checked",
+        "src/tls/x509/csr.rs",
+        "        key.verify_x509(alg, info_whole, sig)\n            .map_err(|_| DerError(\"request signature does not verify\"))?;",
+        "        let _ = key.verify_x509(alg, info_whole, sig);",
+        UNIT, "round_trip_and_a_forged_request", [],
+    ),
+    (
+        "csr: subjectAltName left out of the request",
+        "src/tls/x509/csr.rs",
+        "    if !san.is_empty() {\n        let mut ext",
+        "    if false {\n        let mut ext",
+        UNIT, "round_trip_and_a_forged_request", [],
+    ),
 ]
 
 

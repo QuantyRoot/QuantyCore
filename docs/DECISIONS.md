@@ -784,3 +784,25 @@ timing test on decapsulation of valid against rejected ciphertexts and
 on encapsulation; loopback tests of the fallback and of broken shares;
 and mutants, one of which is an early exit in the re-encryption
 comparison that only the timing test can see.
+
+## ADR-030: Certificate signing requests
+
+`x509::csr` writes PKCS#10 requests (RFC 2986) for a key, a common name
+and subjectAltNames, and reads them back. Reading checks the request's
+signature with the key inside it, so a CA that issues from a parsed
+request knows that the key's holder asked for those names. Together
+with `build::issue` this covers what a private CA needs: a node makes
+its key and a request, the CA checks the request and issues for the key
+in it, and the private key never leaves the node.
+
+Only the extensionRequest attribute is read, and from it only
+subjectAltName with DNS names and IP addresses; anything else a request
+asks for is ignored, since the CA decides what goes into the
+certificate. A name kind other than those two fails the request rather
+than being dropped silently.
+
+**Checked by:** OpenSSL verifying requests written here (Ed25519, P-256,
+RSA) and showing their names; requests written by OpenSSL (Ed25519,
+P-384, RSA) read here, with a flipped signature bit refused, and a
+certificate issued from each verified by OpenSSL; a forged request with
+another key's signature refused; the fuzzer; and two mutants.

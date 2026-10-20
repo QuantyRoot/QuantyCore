@@ -613,3 +613,110 @@ fn go_with_p256_and_rsa() {
         go_both_ways_with(true, kind, false);
     }
 }
+
+/// Certificate requests both ways: OpenSSL checks ours and shows the
+/// names in it, this crate checks OpenSSL's for each key type, and a
+/// certificate issued from OpenSSL's request verifies with OpenSSL.
+#[test]
+#[ignore]
+fn openssl_certificate_requests() {
+    use quantycore::tls::x509::csr::{request, CertificateRequest};
+    let dir = std::env::temp_dir().join(format!("quanty-csr-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = |f: &str| dir.join(f).to_str().unwrap().to_string();
+
+    for kind in [Kind::Ed25519, Kind::P256, Kind::Rsa] {
+        let key = new_key(kind, &dir);
+        let san = vec![
+            SanEntry::Dns("node.cluster.test".into()),
+            SanEntry::Ip("10.0.0.7".parse().unwrap()),
+        ];
+        let der = request("node", &san, &key);
+        std::fs::write(path("ours.csr"), pem::encode("CERTIFICATE REQUEST", &der)).unwrap();
+        let out = Command::new("openssl")
+            .args([
+                "req",
+                "-in",
+                &path("ours.csr"),
+                "-verify",
+                "-noout",
+                "-text",
+            ])
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{text}{err}");
+        assert!(err.contains("verify OK"), "{err}");
+        assert!(
+            text.contains("DNS:node.cluster.test") && text.contains("IP Address:10.0.0.7"),
+            "{text}"
+        );
+    }
+
+    let t = now();
+    let ca_key = PrivateKey::generate_ec(quantycore::tls::crypto::ec::Curve::P256).unwrap();
+    let ca = issue(
+        &Params::ca("CSR Root", t - 60, t + 3600),
+        &ca_key.public_spki(),
+        None,
+        &ca_key,
+    )
+    .unwrap();
+    std::fs::write(path("ca.pem"), pem::encode("CERTIFICATE", &ca)).unwrap();
+    let issuer = Issuer::from_certificate(&ca, &ca_key).unwrap();
+    for newkey in [
+        &["-newkey", "ed25519"][..],
+        &["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-384"],
+        &["-newkey", "rsa:2048"],
+    ] {
+        let st = Command::new("openssl")
+            .args([
+                "req",
+                "-new",
+                "-nodes",
+                "-keyout",
+                &path("theirs.key"),
+                "-subj",
+                "/CN=peer",
+            ])
+            .args(newkey)
+            .args(["-addext", "subjectAltName=DNS:peer.test,IP:10.0.0.2"])
+            .args(["-outform", "DER", "-out", &path("theirs.csr")])
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(st.success());
+        let der = std::fs::read(path("theirs.csr")).unwrap();
+        let r = CertificateRequest::parse(&der).unwrap_or_else(|e| panic!("{newkey:?}: {e:?}"));
+        assert_eq!(
+            r.san,
+            vec![
+                SanEntry::Dns("peer.test".into()),
+                SanEntry::Ip("10.0.0.2".parse().unwrap())
+            ]
+        );
+        let mut bad = der.clone();
+        let n = bad.len();
+        bad[n - 1] ^= 1;
+        assert!(CertificateRequest::parse(&bad).is_err(), "{newkey:?}");
+
+        let leaf = issue(
+            &Params::end_entity("peer", r.san.clone(), t - 60, t + 3600),
+            &r.spki.der,
+            Some(&issuer),
+            &ca_key,
+        )
+        .unwrap();
+        std::fs::write(path("leaf.pem"), pem::encode("CERTIFICATE", &leaf)).unwrap();
+        let out = Command::new("openssl")
+            .args(["verify", "-CAfile", &path("ca.pem"), &path("leaf.pem")])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}

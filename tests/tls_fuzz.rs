@@ -15,6 +15,7 @@
 
 use quantycore::tls::msgs;
 use quantycore::tls::x509::build::{issue, Issuer, Params, SanEntry};
+use quantycore::tls::x509::csr::{request, CertificateRequest};
 use quantycore::tls::x509::{pem, verify_chain, Certificate, PrivateKey, RootStore, Usage};
 use quantycore::tls::{ClientConfig, ClientConnection, ServerConfig, ServerConnection};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -177,6 +178,7 @@ struct Corpus {
     certs: Vec<Vec<u8>>,
     root: Vec<u8>,
     keys: Vec<Vec<u8>>,
+    request: Vec<u8>,
     client_flight: Vec<u8>,
     server_flight: Vec<u8>,
     client_config: Arc<ClientConfig>,
@@ -238,6 +240,14 @@ fn corpus() -> Corpus {
         certs: vec![root.clone(), leaf],
         root,
         keys: vec![root_key.to_pkcs8(), leaf_key.to_pkcs8()],
+        request: request(
+            "fuzz",
+            &[
+                SanEntry::Dns("fuzz.test".into()),
+                SanEntry::Ip("10.1.2.3".parse().unwrap()),
+            ],
+            &root_key,
+        ),
         client_flight,
         server_flight,
         client_config,
@@ -268,6 +278,7 @@ fn fuzz_der_and_x509() {
             NOW,
         );
         let _ = RootStore::new().add_der(&input);
+        let _ = CertificateRequest::parse(&mutate(rng, &c.request, &input));
         let k = rng.below(2);
         let key = mutate(rng, &c.keys[k], &input);
         let _ = PrivateKey::from_pkcs8(&key);

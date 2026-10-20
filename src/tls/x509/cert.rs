@@ -324,7 +324,7 @@ impl Certificate {
     }
 }
 
-fn parse_spki(der: &[u8]) -> R<Spki> {
+pub(crate) fn parse_spki(der: &[u8]) -> R<Spki> {
     let mut outer = Der::new(der);
     let mut s = outer.sequence()?;
     let mut alg = s.sequence()?;
@@ -350,7 +350,7 @@ fn parse_spki(der: &[u8]) -> R<Spki> {
     })
 }
 
-fn general_names(mut s: Der) -> R<Vec<GeneralName>> {
+pub(crate) fn general_names(mut s: Der) -> R<Vec<GeneralName>> {
     let mut out = Vec::new();
     while !s.is_empty() {
         out.push(general_name(&mut s)?);

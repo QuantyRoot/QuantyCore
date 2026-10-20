@@ -1,8 +1,9 @@
 //! X.509 certificates: parsing, path validation, name matching, private
-//! keys, and issuing certificates.
+//! keys, issuing certificates and requesting them.
 
 pub mod build;
 pub mod cert;
+pub mod csr;
 pub mod der;
 pub mod keys;
 pub mod name;

@@ -242,20 +242,7 @@ pub fn issue(
         );
     }
     if !p.san.is_empty() {
-        let mut names = Vec::new();
-        for s in &p.san {
-            match s {
-                SanEntry::Dns(d) => der::write(&mut names, 0x82, d.to_ascii_lowercase().as_bytes()),
-                SanEntry::Ip(std::net::IpAddr::V4(a)) => der::write(&mut names, 0x87, &a.octets()),
-                SanEntry::Ip(std::net::IpAddr::V6(a)) => der::write(&mut names, 0x87, &a.octets()),
-            }
-        }
-        extension(
-            &mut exts,
-            oid::SUBJECT_ALT_NAME,
-            false,
-            &der::wrap(tag::SEQUENCE, &names),
-        );
+        extension(&mut exts, oid::SUBJECT_ALT_NAME, false, &san_der(&p.san));
     }
     extension(
         &mut exts,
@@ -299,6 +286,19 @@ pub fn issue(
     bits.extend_from_slice(&sig);
     der::write(&mut cert, tag::BIT_STRING, &bits);
     Ok(der::wrap(tag::SEQUENCE, &cert))
+}
+
+/// subjectAltName's GeneralNames as DER.
+pub(crate) fn san_der(san: &[SanEntry]) -> Vec<u8> {
+    let mut names = Vec::new();
+    for s in san {
+        match s {
+            SanEntry::Dns(d) => der::write(&mut names, 0x82, d.to_ascii_lowercase().as_bytes()),
+            SanEntry::Ip(std::net::IpAddr::V4(a)) => der::write(&mut names, 0x87, &a.octets()),
+            SanEntry::Ip(std::net::IpAddr::V6(a)) => der::write(&mut names, 0x87, &a.octets()),
+        }
+    }
+    der::wrap(tag::SEQUENCE, &names)
 }
 
 /// KeyUsage as a DER BIT STRING: bit 0 is the top bit of the first
