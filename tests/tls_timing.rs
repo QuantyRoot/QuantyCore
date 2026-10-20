@@ -347,3 +347,48 @@ fn p384_ecdsa_sign() {
         )
     });
 }
+
+/// RSA signing with one key on a fixed and on random messages: blinding
+/// and the fixed window must hide the value being exponentiated. The key
+/// comes from OpenSSL; without it the test is skipped.
+#[test]
+#[ignore]
+fn rsa_2048_sign() {
+    use quantycore::tls::crypto::sha2::HashAlg;
+    use quantycore::tls::x509::PrivateKey;
+    let dir = std::env::temp_dir().join(format!("quanty-timing-rsa-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("k.pem");
+    let ok = std::process::Command::new("openssl")
+        .args([
+            "genpkey",
+            "-algorithm",
+            "RSA",
+            "-pkeyopt",
+            "rsa_keygen_bits:2048",
+            "-out",
+        ])
+        .arg(&path)
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    if !ok {
+        eprintln!("openssl not available, RSA timing not run");
+        return;
+    }
+    let Ok(PrivateKey::Rsa(key, _)) =
+        PrivateKey::from_pem(&std::fs::read_to_string(&path).unwrap())
+    else {
+        panic!("RSA key does not load");
+    };
+    check("RSA-2048 signing", || {
+        measure(
+            samples(400),
+            1,
+            |r| if r { random::<32>() } else { [0u8; 32] },
+            |m| {
+                black_box(key.sign_pkcs1(HashAlg::Sha256, black_box(m)).unwrap());
+            },
+        )
+    });
+}

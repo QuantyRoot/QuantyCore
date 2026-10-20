@@ -33,11 +33,45 @@ fn now() -> i64 {
         .as_secs() as i64
 }
 
-fn pki(tag: &str) -> Pki {
+#[derive(Clone, Copy)]
+enum Kind {
+    Ed25519,
+    P256,
+    Rsa,
+}
+
+/// A key of `kind`. RSA keys come from OpenSSL, since this crate does not
+/// generate them; that also checks that OpenSSL's PKCS#8 loads here.
+fn new_key(kind: Kind, dir: &std::path::Path) -> PrivateKey {
+    match kind {
+        Kind::Ed25519 => PrivateKey::generate_ed25519().unwrap(),
+        Kind::P256 => PrivateKey::generate_ec(quantycore::tls::crypto::ec::Curve::P256).unwrap(),
+        Kind::Rsa => {
+            let path = dir.join("rsa-gen.key");
+            let st = Command::new("openssl")
+                .args([
+                    "genpkey",
+                    "-algorithm",
+                    "RSA",
+                    "-pkeyopt",
+                    "rsa_keygen_bits:2048",
+                    "-out",
+                ])
+                .arg(&path)
+                .stderr(Stdio::null())
+                .status()
+                .unwrap();
+            assert!(st.success());
+            PrivateKey::from_pem(&std::fs::read_to_string(&path).unwrap()).unwrap()
+        }
+    }
+}
+
+fn pki_of(tag: &str, kind: Kind) -> Pki {
     let dir = std::env::temp_dir().join(format!("quanty-interop-{tag}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let t = now();
-    let root_key = PrivateKey::generate_ed25519().unwrap();
+    let root_key = new_key(kind, &dir);
     let root = issue(
         &Params::ca("Interop Root", t - 3600, t + 86400),
         &root_key.public_spki(),
@@ -58,8 +92,8 @@ fn pki(tag: &str) -> Pki {
         );
         issue(&p, &key.public_spki(), Some(&issuer), &root_key).unwrap()
     };
-    let server_key = PrivateKey::generate_ed25519().unwrap();
-    let client_key = PrivateKey::generate_ed25519().unwrap();
+    let server_key = new_key(kind, &dir);
+    let client_key = new_key(kind, &dir);
     let server = leaf("server", &server_key);
     let client = leaf("client", &client_key);
     let write = |name: &str, s: String| std::fs::write(dir.join(name), s).unwrap();
@@ -122,7 +156,11 @@ fn connect_retry(port: u16) -> TcpStream {
 /// Our client against `openssl s_server -www`, which answers an HTTP
 /// request with a page describing the connection.
 fn client_against_s_server(mtls: bool) {
-    let p = pki(if mtls { "c-mtls" } else { "c" });
+    client_against_s_server_with(mtls, Kind::Ed25519);
+}
+
+fn client_against_s_server_with(mtls: bool, kind: Kind) {
+    let p = pki_of(if mtls { "c-mtls" } else { "c" }, kind);
     let port = free_port();
     let mut cmd = Command::new("openssl");
     cmd.args([
@@ -179,7 +217,11 @@ fn client_against_s_server(mtls: bool) {
 /// `openssl s_client` against our server, which echoes one line back
 /// upper case and closes.
 fn s_client_against_server(mtls: bool) {
-    let p = pki(if mtls { "s-mtls" } else { "s" });
+    s_client_against_server_with(mtls, Kind::Ed25519);
+}
+
+fn s_client_against_server_with(mtls: bool, kind: Kind) {
+    let p = pki_of(if mtls { "s-mtls" } else { "s" }, kind);
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let mut config = ServerConfig::new(
@@ -339,7 +381,11 @@ fn go_program(p: &Pki) -> Option<PathBuf> {
 }
 
 fn go_both_ways(mtls: bool) {
-    let p = pki(if mtls { "go-mtls" } else { "go" });
+    go_both_ways_with(mtls, Kind::Ed25519);
+}
+
+fn go_both_ways_with(mtls: bool, kind: Kind) {
+    let p = pki_of(if mtls { "go-mtls" } else { "go" }, kind);
     let Some(bin) = go_program(&p) else {
         return;
     };
@@ -428,4 +474,21 @@ fn go_crypto_tls() {
 #[ignore]
 fn go_crypto_tls_mtls() {
     go_both_ways(true);
+}
+
+#[test]
+#[ignore]
+fn openssl_with_p256_and_rsa() {
+    for kind in [Kind::P256, Kind::Rsa] {
+        client_against_s_server_with(true, kind);
+        s_client_against_server_with(true, kind);
+    }
+}
+
+#[test]
+#[ignore]
+fn go_with_p256_and_rsa() {
+    for kind in [Kind::P256, Kind::Rsa] {
+        go_both_ways_with(true, kind);
+    }
 }

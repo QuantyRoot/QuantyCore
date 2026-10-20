@@ -12,5 +12,6 @@ pub mod gcm;
 pub mod hkdf;
 pub mod hmac;
 pub mod rand;
+pub mod rsa;
 pub mod sha2;
 pub mod x25519;

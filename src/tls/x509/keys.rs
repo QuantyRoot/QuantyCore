@@ -8,11 +8,31 @@ use crate::tls::auth::{scheme, Signer};
 use crate::tls::crypto::ct;
 use crate::tls::crypto::ec::{self, Curve};
 use crate::tls::crypto::ed25519::SigningKey;
+use crate::tls::crypto::rsa;
+use crate::tls::crypto::sha2::HashAlg;
 use crate::tls::error::Error;
 
 pub enum PrivateKey {
     Ed25519(SigningKey),
     Ec(ec::SecretKey),
+    /// The key, and its PKCS#1 encoding to write it back out.
+    Rsa(rsa::PrivateKey, ct::Secret),
+}
+
+/// PKCS#1 RSAPrivateKey (RFC 8017 A.1.2), two primes only.
+pub fn rsa_from_pkcs1(der: &[u8]) -> Result<rsa::PrivateKey, &'static str> {
+    let e = |_| "malformed RSA private key";
+    let mut outer = Der::new(der);
+    let mut s = outer.sequence().map_err(e)?;
+    if s.small_unsigned().map_err(e)? != 0 {
+        return Err("RSA keys with more than two primes are not supported");
+    }
+    let n = s.unsigned().map_err(e)?;
+    let pe = s.unsigned().map_err(e)?;
+    let d = s.unsigned().map_err(e)?;
+    let p = s.unsigned().map_err(e)?;
+    let q = s.unsigned().map_err(e)?;
+    rsa::PrivateKey::new(n, pe, d, p, q).ok_or("RSA key is inconsistent or of an unsupported size")
 }
 
 fn curve_oid(c: Curve) -> &'static [u8] {
@@ -59,6 +79,7 @@ impl std::fmt::Debug for PrivateKey {
         match self {
             PrivateKey::Ed25519(_) => f.write_str("PrivateKey(Ed25519)"),
             PrivateKey::Ec(k) => write!(f, "PrivateKey({:?})", k.curve()),
+            PrivateKey::Rsa(k, _) => write!(f, "PrivateKey(RSA {})", k.public().bits()),
         }
     }
 }
@@ -100,19 +121,23 @@ impl PrivateKey {
                 let curve = curve_from_oid(alg.oid().map_err(e)?).ok_or("unsupported curve")?;
                 sec1(key, Some(curve))
             }
+            oid::RSA_ENCRYPTION => {
+                rsa_from_pkcs1(key).map(|k| PrivateKey::Rsa(k, ct::Secret::from(key)))
+            }
             _ => Err("unsupported private key algorithm"),
         }
     }
 
     /// The first private key in a PEM text.
     pub fn from_pem(text: &str) -> Result<PrivateKey, &'static str> {
-        match pem::decode_first(text, &["PRIVATE KEY", "EC PRIVATE KEY"])? {
+        match pem::decode_first(text, &["PRIVATE KEY", "EC PRIVATE KEY", "RSA PRIVATE KEY"])? {
             Some((label, der)) => {
                 let der = crate::tls::crypto::ct::Secret::new(der);
-                if label == "EC PRIVATE KEY" {
-                    sec1(der.expose(), None)
-                } else {
-                    PrivateKey::from_pkcs8(der.expose())
+                match label {
+                    "EC PRIVATE KEY" => sec1(der.expose(), None),
+                    "RSA PRIVATE KEY" => rsa_from_pkcs1(der.expose())
+                        .map(|k| PrivateKey::Rsa(k, ct::Secret::from(der.expose()))),
+                    _ => PrivateKey::from_pkcs8(der.expose()),
                 }
             }
             None => Err("no private key in PEM text"),
@@ -148,6 +173,13 @@ impl PrivateKey {
                 );
                 der::wrap(tag::SEQUENCE, &body)
             }
+            PrivateKey::Rsa(_, pkcs1) => {
+                let mut body = Vec::new();
+                der::write(&mut body, tag::INTEGER, &[0]);
+                der::write(&mut body, tag::SEQUENCE, &rsa_alg_id());
+                der::write(&mut body, tag::OCTET_STRING, pkcs1.expose());
+                der::wrap(tag::SEQUENCE, &body)
+            }
         }
     }
 
@@ -174,6 +206,16 @@ impl PrivateKey {
                 der::write(&mut body, tag::BIT_STRING, &bits);
                 der::wrap(tag::SEQUENCE, &body)
             }
+            PrivateKey::Rsa(k, _) => {
+                let mut key = Vec::new();
+                der::write_unsigned(&mut key, &k.public().modulus());
+                der::write_unsigned(&mut key, &k.public().exponent());
+                let mut body = der::wrap(tag::SEQUENCE, &rsa_alg_id());
+                let mut bits = vec![0];
+                bits.extend_from_slice(&der::wrap(tag::SEQUENCE, &key));
+                der::write(&mut body, tag::BIT_STRING, &bits);
+                der::wrap(tag::SEQUENCE, &body)
+            }
         }
     }
 
@@ -195,8 +237,25 @@ impl PrivateKey {
                     ecdsa_der(k, hash, tbs),
                 )
             }
+            // PKCS#1 v1.5 with SHA-256: what every verifier accepts in a
+            // certificate.
+            PrivateKey::Rsa(k, _) => {
+                let mut alg = der::wrap(tag::OID, oid::SHA256_WITH_RSA);
+                der::write(&mut alg, tag::NULL, &[]);
+                let sig = k
+                    .sign_pkcs1(HashAlg::Sha256, tbs)
+                    .expect("randomness for RSA blinding");
+                (der::wrap(tag::SEQUENCE, &alg), sig)
+            }
         }
     }
+}
+
+/// rsaEncryption with its NULL parameter.
+fn rsa_alg_id() -> Vec<u8> {
+    let mut alg = der::wrap(tag::OID, oid::RSA_ENCRYPTION);
+    der::write(&mut alg, tag::NULL, &[]);
+    alg
 }
 
 /// An ECDSA signature over `msg`, as the DER SEQUENCE of r and s. The
@@ -215,6 +274,11 @@ fn ecdsa_der(k: &ec::SecretKey, hash: crate::tls::crypto::sha2::HashAlg, msg: &[
     der::wrap(tag::SEQUENCE, &body)
 }
 
+fn pss(k: &rsa::PrivateKey, hash: HashAlg, msg: &[u8]) -> Result<Vec<u8>, Error> {
+    k.sign_pss(hash, msg)
+        .map_err(|_| Error::internal("RSA signing failed"))
+}
+
 impl Signer for PrivateKey {
     fn choose_scheme(&self, offered: &[u16]) -> Option<u16> {
         match self {
@@ -226,6 +290,14 @@ impl Signer for PrivateKey {
                 };
                 offered.iter().copied().find(|&s| s == mine)
             }
+            PrivateKey::Rsa(..) => offered.iter().copied().find(|&s| {
+                matches!(
+                    s,
+                    scheme::RSA_PSS_RSAE_SHA256
+                        | scheme::RSA_PSS_RSAE_SHA384
+                        | scheme::RSA_PSS_RSAE_SHA512
+                )
+            }),
         }
     }
 
@@ -238,6 +310,9 @@ impl Signer for PrivateKey {
             (PrivateKey::Ec(k), scheme::ECDSA_SECP384R1_SHA384) if k.curve() == Curve::P384 => {
                 Ok(ecdsa_der(k, crate::tls::crypto::sha2::HashAlg::Sha384, msg))
             }
+            (PrivateKey::Rsa(k, _), scheme::RSA_PSS_RSAE_SHA256) => pss(k, HashAlg::Sha256, msg),
+            (PrivateKey::Rsa(k, _), scheme::RSA_PSS_RSAE_SHA384) => pss(k, HashAlg::Sha384, msg),
+            (PrivateKey::Rsa(k, _), scheme::RSA_PSS_RSAE_SHA512) => pss(k, HashAlg::Sha512, msg),
             _ => Err(Error::internal("scheme does not fit the key")),
         }
     }

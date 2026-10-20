@@ -20,6 +20,7 @@ through and add a new entry, never silently edit history.
 - [ADR-023](#adr-023-constant-time-is-measured-not-assumed) Constant time is measured, not assumed
 - [ADR-024](#adr-024-x509-validation-like-webpki-not-like-a-browser) X.509 validation like webpki, not like a browser
 - [ADR-025](#adr-025-x509-measured-against-x509-limbo-and-expired-roots-refused) X.509 measured against x509-limbo, and expired roots refused
+- [ADR-026](#adr-026-rsa-without-crt-and-without-key-generation) RSA without CRT and without key generation
 
 ## ADR-001: Nothing outside the standard library, and QuantyRoot is not outside
 
@@ -627,3 +628,43 @@ extensions of trust anchors, none of which affects what a chain proves.
 **Cost:** certificates with underscores in DNS names, which some
 private networks issue, are refused. The CA/Browser Forum has forbidden
 them in public certificates since 2019.
+
+## ADR-026: RSA without CRT and without key generation
+
+RSA is here because Kubernetes tooling and most public registries use
+RSA certificates (ADR-003). It verifies PKCS#1 v1.5 and PSS signatures
+and signs with PSS (TLS 1.3 CertificateVerify) and PKCS#1 v1.5
+(certificates, and TLS 1.2 later), for moduli of 2048 to 4096 bits.
+
+- **No Chinese remainder theorem.** The private exponentiation runs once
+  modulo n, with a fixed 4-bit window that reads the whole table for
+  every lookup. CRT would be about three times faster, but a fault in one
+  of its two halves hands out a signature from which the modulus can be
+  factored (the Bellcore attack). Every signature is also verified
+  before it leaves, which catches that fault in either design.
+- **Blinding** multiplies the message by r^e before the exponentiation
+  and the result by r^-1 after, for a fresh random r. r^-1 is computed
+  as r^(phi(n) - 1) with the same constant time exponentiation, so the
+  inversion does not need a variable time extended Euclid on a secret.
+  This costs a second private exponentiation per signature.
+- **Cost:** an RSA-2048 signature takes a few milliseconds and RSA-4096
+  tens of milliseconds, once per handshake on the side that signs. A
+  server that cares can use an ECDSA certificate.
+- **No key generation.** Generating RSA keys needs constant time prime
+  testing and is a large piece of code for a key type nobody new should
+  choose; QuantyKube issues ECDSA or Ed25519 keys. RSA keys are loaded
+  from PKCS#1 or PKCS#8.
+- **Refused keys:** moduli outside 2048 to 4096 bits or not a whole
+  number of bytes, even exponents, exponents above 2^32, more than two
+  primes, and keys whose parts do not fit together (p*q must be n, and
+  e*d must be 1 modulo p-1 and q-1, which also accepts keys where d was
+  computed modulo lcm(p-1, q-1), as OpenSSL does).
+- PKCS#1 v1.5 verification builds the expected encoding and compares it
+  whole instead of parsing the padding, which is how the 2006
+  Bleichenbacher forgery against lax parsers worked.
+
+**Checked by:** Wycheproof PKCS#1 and PSS verification for 2048, 3072 and
+4096 bits, the deterministic PKCS#1 signatures of Wycheproof's signature
+generation suite reproduced byte for byte, x509-limbo's RSA chains, the
+timing test on RSA-2048 signing, and handshakes with RSA certificates
+against OpenSSL and Go.

@@ -3,6 +3,7 @@
 
 use super::crypto::ec::{self, Curve};
 use super::crypto::ed25519;
+use super::crypto::rsa;
 use super::crypto::sha2::HashAlg;
 use super::error::{alert, Error};
 use super::x509::cert::{oid, Spki};
@@ -27,6 +28,7 @@ pub enum PublicKey {
     Ed25519([u8; 32]),
     /// An uncompressed point, checked to be on the curve.
     Ec(Curve, Vec<u8>),
+    Rsa(rsa::PublicKey),
     /// Accepts every signature. Exists only in this crate's tests, for
     /// the RFC 8448 traces, whose RSA signatures come before RSA does.
     #[cfg(test)]
@@ -61,6 +63,18 @@ impl PublicKey {
                 }
                 Ok(PublicKey::Ec(curve, spki.key.clone()))
             }
+            oid::RSA_ENCRYPTION => {
+                let bad = |_| CertError::Malformed("RSA public key");
+                let mut outer = Der::new(&spki.key);
+                let mut s = outer.sequence().map_err(bad)?;
+                let n = s.unsigned().map_err(bad)?;
+                let e = s.unsigned().map_err(bad)?;
+                s.end().map_err(bad)?;
+                outer.end().map_err(bad)?;
+                rsa::PublicKey::new(n, e)
+                    .map(PublicKey::Rsa)
+                    .ok_or(CertError::UnsupportedAlgorithm)
+            }
             _ => Err(CertError::UnsupportedAlgorithm),
         }
     }
@@ -84,6 +98,30 @@ impl PublicKey {
                 };
                 ecdsa_verify(*curve, q, hash, tbs, sig)
             }
+            (PublicKey::Rsa(k), id) => {
+                let hash = match id {
+                    oid::SHA256_WITH_RSA => Some(HashAlg::Sha256),
+                    oid::SHA384_WITH_RSA => Some(HashAlg::Sha384),
+                    oid::SHA512_WITH_RSA => Some(HashAlg::Sha512),
+                    _ => None,
+                };
+                match hash {
+                    // RFC 4055 2.1: the parameters are NULL.
+                    Some(h) => {
+                        if alg.expect(super::x509::der::tag::NULL).ok() != Some(&[][..])
+                            || !alg.is_empty()
+                        {
+                            return Err(CertError::Malformed("RSA signature parameters"));
+                        }
+                        k.verify_pkcs1(h, tbs, sig)
+                    }
+                    None if id == oid::RSA_PSS => {
+                        let (h, salt) = pss_params(&mut alg)?;
+                        k.verify_pss(h, tbs, sig, salt)
+                    }
+                    None => return Err(CertError::UnsupportedAlgorithm),
+                }
+            }
             _ => return Err(CertError::UnsupportedAlgorithm),
         };
         if ok {
@@ -100,6 +138,11 @@ impl PublicKey {
             PublicKey::Ed25519(_) => &[scheme::ED25519],
             PublicKey::Ec(Curve::P256, _) => &[scheme::ECDSA_SECP256R1_SHA256],
             PublicKey::Ec(Curve::P384, _) => &[scheme::ECDSA_SECP384R1_SHA384],
+            PublicKey::Rsa(_) => &[
+                scheme::RSA_PSS_RSAE_SHA256,
+                scheme::RSA_PSS_RSAE_SHA384,
+                scheme::RSA_PSS_RSAE_SHA512,
+            ],
             #[cfg(test)]
             PublicKey::AcceptAny => &[],
         }
@@ -116,6 +159,16 @@ impl PublicKey {
             (PublicKey::Ec(Curve::P384, q), scheme::ECDSA_SECP384R1_SHA384) => {
                 ecdsa_verify(Curve::P384, q, HashAlg::Sha384, msg, sig)
             }
+            // RSA-PSS with the salt as long as the hash (RFC 8446 4.2.3).
+            (PublicKey::Rsa(k), scheme::RSA_PSS_RSAE_SHA256) => {
+                k.verify_pss(HashAlg::Sha256, msg, sig, 32)
+            }
+            (PublicKey::Rsa(k), scheme::RSA_PSS_RSAE_SHA384) => {
+                k.verify_pss(HashAlg::Sha384, msg, sig, 48)
+            }
+            (PublicKey::Rsa(k), scheme::RSA_PSS_RSAE_SHA512) => {
+                k.verify_pss(HashAlg::Sha512, msg, sig, 64)
+            }
             #[cfg(test)]
             (PublicKey::AcceptAny, _) => true,
             _ => return Err(Error::illegal("signature scheme does not fit the key")),
@@ -129,6 +182,46 @@ impl PublicKey {
             ))
         }
     }
+}
+
+/// RSASSA-PSS-params (RFC 4055 3.1), limited to what is safe and in
+/// use: SHA-256, SHA-384 or SHA-512, MGF1 with the same hash, trailer 1.
+fn pss_params(alg: &mut Der) -> Result<(HashAlg, usize), CertError> {
+    use super::x509::der::tag;
+    let bad = |_| CertError::Malformed("RSASSA-PSS parameters");
+    let mut p = alg.sequence().map_err(bad)?;
+    let hash_of = |d: &[u8]| -> Result<HashAlg, CertError> {
+        let mut a = Der::new(d).sequence().map_err(bad)?;
+        let id = a.oid().map_err(bad)?;
+        let _ = a.optional(tag::NULL).map_err(bad)?;
+        match id {
+            [0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01] => Ok(HashAlg::Sha256),
+            [0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x02] => Ok(HashAlg::Sha384),
+            [0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03] => Ok(HashAlg::Sha512),
+            _ => Err(CertError::UnsupportedAlgorithm),
+        }
+    };
+    let hash = hash_of(p.expect(tag::context_constructed(0)).map_err(bad)?)?;
+    let mgf = p.expect(tag::context_constructed(1)).map_err(bad)?;
+    let mut m = Der::new(mgf).sequence().map_err(bad)?;
+    if m.oid().map_err(bad)? != [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x08] {
+        return Err(CertError::UnsupportedAlgorithm);
+    }
+    let (_, inner) = m.expect_whole(tag::SEQUENCE).map_err(bad)?;
+    if hash_of(inner)? != hash {
+        return Err(CertError::UnsupportedAlgorithm);
+    }
+    let salt = match p.optional(tag::context_constructed(2)).map_err(bad)? {
+        Some(v) => Der::new(v).small_unsigned().map_err(bad)? as usize,
+        None => 20,
+    };
+    if let Some(t) = p.optional(tag::context_constructed(3)).map_err(bad)? {
+        if Der::new(t).small_unsigned().map_err(bad)? != 1 {
+            return Err(CertError::Malformed("RSASSA-PSS trailer"));
+        }
+    }
+    p.end().map_err(bad)?;
+    Ok((hash, salt))
 }
 
 fn ecdsa_verify(curve: Curve, q: &[u8], hash: HashAlg, msg: &[u8], sig: &[u8]) -> bool {

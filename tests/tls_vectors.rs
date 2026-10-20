@@ -584,3 +584,130 @@ fn cavp_ecdsa_sigver() {
     eprintln!("CAVP ECDSA SigVer: {n} cases");
     assert!(n >= 90, "SigVer incomplete");
 }
+
+fn rsa_public(group: &Json) -> quantycore::tls::crypto::rsa::PublicKey {
+    let k = group.get("publicKey").unwrap();
+    quantycore::tls::crypto::rsa::PublicKey::new(&k.hex("modulus"), &k.hex("publicExponent"))
+        .unwrap()
+}
+
+/// PKCS#1 v1.5 verification: signatures with wrong padding, wrong
+/// DigestInfo, trailing data and other Bleichenbacher style forgeries.
+#[test]
+fn wycheproof_rsa_pkcs1_verify() {
+    for bits in [2048, 3072, 4096] {
+        for sha in ["sha256", "sha512"] {
+            let file = format!("rsa_signature_{bits}_{sha}_test.json");
+            let Some(doc) = wycheproof(&file) else {
+                return;
+            };
+            let (mut valid, mut invalid) = (0, 0);
+            for group in doc.list("testGroups") {
+                let key = rsa_public(group);
+                let hash = hash_of(group.str("sha")).unwrap();
+                for t in group.list("tests") {
+                    let ok = key.verify_pkcs1(hash, &t.hex("msg"), &t.hex("sig"));
+                    match t.str("result") {
+                        "valid" => {
+                            assert!(ok, "{file} {} rejected", t.num("tcId"));
+                            // The same value one byte longer is not a
+                            // signature of the modulus's length (RFC 8017
+                            // 8.2.2 step 1).
+                            let mut longer = vec![0u8];
+                            longer.extend(t.hex("sig"));
+                            assert!(
+                                !key.verify_pkcs1(hash, &t.hex("msg"), &longer),
+                                "{file} {} longer",
+                                t.num("tcId")
+                            );
+                            valid += 1;
+                        }
+                        "invalid" => {
+                            assert!(!ok, "{file} {} accepted", t.num("tcId"));
+                            invalid += 1;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            assert!(
+                valid >= 1 && invalid >= 50,
+                "{file}: {valid} valid, {invalid} invalid"
+            );
+        }
+    }
+}
+
+#[test]
+fn wycheproof_rsa_pss_verify() {
+    let files = [
+        "rsa_pss_2048_sha256_mgf1_32_test.json",
+        "rsa_pss_3072_sha256_mgf1_32_test.json",
+        "rsa_pss_4096_sha256_mgf1_32_test.json",
+        "rsa_pss_4096_sha512_mgf1_64_test.json",
+        "rsa_pss_2048_sha256_mgf1_0_test.json",
+    ];
+    for file in files {
+        let Some(doc) = wycheproof(file) else {
+            return;
+        };
+        let (mut valid, mut invalid) = (0, 0);
+        for group in doc.list("testGroups") {
+            let key = rsa_public(group);
+            let hash = hash_of(group.str("sha")).unwrap();
+            assert_eq!(group.str("mgfSha"), group.str("sha"));
+            let salt = group.num("sLen") as usize;
+            for t in group.list("tests") {
+                let ok = key.verify_pss(hash, &t.hex("msg"), &t.hex("sig"), salt);
+                match t.str("result") {
+                    "valid" => {
+                        assert!(ok, "{file} {} rejected", t.num("tcId"));
+                        valid += 1;
+                    }
+                    "invalid" => {
+                        assert!(!ok, "{file} {} accepted", t.num("tcId"));
+                        invalid += 1;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert!(
+            valid >= 1 && invalid >= 10,
+            "{file}: {valid} valid, {invalid} invalid"
+        );
+    }
+}
+
+/// PKCS#1 v1.5 signatures are deterministic, so signing with the suite's
+/// private keys must give exactly its signatures.
+#[test]
+fn wycheproof_rsa_pkcs1_sign() {
+    use quantycore::tls::x509::PrivateKey;
+    let mut n = 0;
+    for bits in [2048, 3072, 4096] {
+        let file = format!("rsa_pkcs1_{bits}_sig_gen_test.json");
+        let Some(doc) = wycheproof(&file) else {
+            return;
+        };
+        for group in doc.list("testGroups") {
+            let Some(hash) = hash_of(group.str("sha")) else {
+                continue;
+            };
+            let Ok(PrivateKey::Rsa(key, _)) = PrivateKey::from_pkcs8(&group.hex("privateKeyPkcs8"))
+            else {
+                panic!("{file}: key does not load");
+            };
+            for t in group.list("tests") {
+                if t.str("result") != "valid" {
+                    continue;
+                }
+                let sig = key.sign_pkcs1(hash, &t.hex("msg")).unwrap();
+                assert_eq!(sig, t.hex("sig"), "{file} {}", t.num("tcId"));
+                n += 1;
+            }
+        }
+    }
+    eprintln!("RSA PKCS#1 signatures generated: {n}");
+    assert!(n >= 20, "too few RSA signing cases");
+}

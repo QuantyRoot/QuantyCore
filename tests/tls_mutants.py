@@ -705,6 +705,41 @@ MUTANTS = [
         "    if false {",
         VECTORS, "wycheproof_ecdsa", ["QUANTY_WYCHEPROOF"],
     ),
+    (
+        "rsa: PKCS#1 checks only the hash at the end",
+        "src/tls/crypto/rsa.rs",
+        "            Some(want) => ct::eq(&em, &want),",
+        "            Some(want) => ct::eq(&em[em.len() - 32..], &want[want.len() - 32..]),",
+        VECTORS, "wycheproof_rsa_pkcs1_verify", ["QUANTY_WYCHEPROOF"],
+    ),
+    (
+        "rsa: PSS separator byte not checked",
+        "src/tls/crypto/rsa.rs",
+        "|| db[ps_len] != 1 {",
+        "|| false {",
+        VECTORS, "wycheproof_rsa_pss_verify", ["QUANTY_WYCHEPROOF"],
+    ),
+    (
+        "rsa: signature length not checked",
+        "src/tls/crypto/rsa.rs",
+        "        if sig.len() != self.bytes {",
+        "        if false {",
+        VECTORS, "wycheproof_rsa_pkcs1_verify", ["QUANTY_WYCHEPROOF"],
+    ),
+    (
+        "rsa: window lookup picks the wrong entry",
+        "src/tls/crypto/rsa.rs",
+        "let mask = ct::eq_mask_u32(j as u32, idx) as u64;",
+        "let mask = ct::eq_mask_u32(j as u32, idx & 7) as u64;",
+        VECTORS, "wycheproof_rsa_pkcs1_sign", ["QUANTY_WYCHEPROOF"],
+    ),
+    (
+        "rsa: blinding factor not removed",
+        "src/tls/crypto/rsa.rs",
+        "&md.to_mont(&r_inv)",
+        "&md.to_mont(&r)",
+        VECTORS, "wycheproof_rsa_pkcs1_sign", ["QUANTY_WYCHEPROOF"],
+    ),
 ]
 
 

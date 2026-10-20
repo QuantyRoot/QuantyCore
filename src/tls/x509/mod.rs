@@ -26,6 +26,9 @@ pub(crate) fn supported_schemes() -> Vec<u16> {
         scheme::ECDSA_SECP256R1_SHA256,
         scheme::ED25519,
         scheme::ECDSA_SECP384R1_SHA384,
+        scheme::RSA_PSS_RSAE_SHA256,
+        scheme::RSA_PSS_RSAE_SHA384,
+        scheme::RSA_PSS_RSAE_SHA512,
     ]
 }
 
