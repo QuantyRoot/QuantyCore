@@ -13,7 +13,7 @@ on the Rust standard library.
 
 | Part | State |
 | --- | --- |
-| Protobuf wire format: varints, field keys | built, tested |
+| Protobuf wire format: reading and writing messages | built, tested |
 | HPACK: decoder with dynamic table, stateless encoder | built, tested |
 | HTTP/2, server side, sans I/O | built, tested |
 | gRPC server on blocking sockets | built, tested |
