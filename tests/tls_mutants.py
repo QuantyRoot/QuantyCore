@@ -259,7 +259,7 @@ MUTANTS = [
     (
         "poly1305: no final subtraction of p",
         "src/tls/crypto/chacha20poly1305.rs",
-        "let keep_g = (g[4] >> 31).wrapping_sub(1);",
+        "let keep_g = std::hint::black_box(g[4] >> 31).wrapping_sub(1);",
         "let keep_g = 0u32;",
         UNIT, "poly1305_reduces_values_just_above_p", [],
     ),
