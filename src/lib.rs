@@ -3,5 +3,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod grpc;
+pub mod h2;
 pub mod hpack;
 pub mod proto;
