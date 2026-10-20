@@ -25,6 +25,7 @@ through and add a new entry, never silently edit history.
 - [ADR-032](#adr-032-apparmor-is-written-here) AppArmor is written here
 - [ADR-033](#adr-033-the-profile-language-is-read-the-way-flex-and-bison-read-it) The profile language is read the way flex and bison read it
 - [ADR-034](#adr-034-variables-conditions-and-rule-semantics-follow-upstreams-order) Variables, conditions and rule semantics follow upstream's order
+- [ADR-035](#adr-035-the-automaton-is-upstreams-language-built-by-other-steps) The automaton is upstream's language, built by other steps
 
 ## ADR-001: Nothing outside the standard library, and QuantyRoot is not outside
 
@@ -1030,3 +1031,56 @@ all of which upstream accepts, and all of which must pass here.
 **Cost:** the quirks above have to be followed when upstream changes
 them, and a profile that relies on one of them behaves the same here
 rather than better.
+
+## ADR-035: The automaton is upstream's language, built by other steps
+
+The compiler turns a profile's file rules and attachment into the
+automata the kernel matches paths against. What the kernel sees must be
+what `apparmor_parser` produces; how it gets there need not be.
+
+**What is the same as upstream.** Patterns become regular expressions by
+upstream's conversion (`aare.rs`), the expressions are read by upstream's
+grammar (`regex.rs`), rules with equal permissions form one group, and
+each group is simplified by upstream's factoring steps, on the same
+binary tree shape, before the groups are joined (`tree.rs`). A state's
+permissions are combined by upstream's rules (priority, then deny over
+exact exec over allow over prompt; ix implies m), conflicting exec
+modifiers at equal standing are an error, and deny bits are folded into
+the allow mask as upstream's default options do. Minimization starts
+from a partition by permissions and keeps the start state apart, as
+upstream's does. For given permissions per state the minimal automaton
+is unique, so the result does not depend on the route.
+
+**What is different.** The subset construction runs over classes of
+bytes that no expression tells apart, computed once per automaton,
+instead of upstream's per state transition maps; positions are numbered
+leaves of an arena tree, and every walk over the tree uses an explicit
+stack, because factoring a list of long paths builds a trie whose depth
+is a path's length. Minimization is Moore's refinement.
+
+**Why the factoring is upstream's own.** Without it, upstream's suite
+contains a profile (`profile/exploding_profile.sd`) whose subset
+construction does not finish in memory; with it the result has 870
+states and takes 60 ms. Factoring decides which intermediate automata
+grow, so a different scheme would explode on profiles upstream compiles
+and compile profiles upstream cannot. Upstream's factoring is quadratic
+in the length of the paths it factors; that is kept too.
+
+**Limits upstream does not have:** 2^21 states per automaton, 2^27
+follow entries, and 2^31 factoring steps. Upstream has none and runs
+until memory or patience ends; here the profile is refused with an
+error naming the automaton. No profile in upstream's suite or in the
+corpus comes near them.
+
+**Rejected:** porting upstream's hfa.cc data structures. They are slower
+to port faithfully, and since the minimal automaton is unique, their
+result is the same.
+
+**Checked by:** unit tests on factoring, permission combination,
+conflicts, minimization and limits; upstream's simple_tests, whose
+exec conflict cases are refused; the corpus, all 435 profiles of which
+compile.
+
+**Cost:** an automaton is compared with upstream's only through its
+behaviour, so a difference shows up as a differing state, not as a
+differing step.

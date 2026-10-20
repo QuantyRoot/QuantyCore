@@ -17,6 +17,7 @@ set -eu
 dest=$1
 upstream=$2
 here=$(cd "$(dirname "$0")" && pwd)
+mkdir -p "$dest"
 
 deb() {
     name=$1 url=$2 sum=$3 into=$4

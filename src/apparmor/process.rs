@@ -11,6 +11,7 @@ pub(crate) struct Processor<'s> {
     pub sources: &'s Sources,
     pub symtab: Symtab,
     pub aliases: Vec<(Vec<u8>, Vec<u8>)>,
+    pub support: super::compile::Support,
 }
 
 /// Upstream's filter_slashes: runs of slashes become one, except that a
@@ -113,6 +114,11 @@ impl Processor<'_> {
         self.variables(prof, parents)?;
         self.apply_aliases(prof);
         self.merge(prof)?;
+        let span = prof.span;
+        prof.xmatch = super::compile::xmatch(prof, &self.support)
+            .map_err(|m| self.sources.error_at(span, m))?;
+        prof.file_dfa = super::compile::file_dfa(prof, &self.support)
+            .map_err(|m| self.sources.error_at(span, m))?;
         let mut chain = parents.to_vec();
         chain.push(prof.name.clone());
         for hat in prof.hats.values_mut() {

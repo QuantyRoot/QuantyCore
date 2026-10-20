@@ -45,6 +45,7 @@ pub(crate) mod perm {
     pub const FILE_PERMS: u32 = USER_PERMS | OTHER_PERMS;
 
     pub const CHANGE_HAT: u32 = 1 << 30;
+    pub const ONEXEC: u32 = 1 << 30;
     pub const CHANGE_PROFILE: u32 = 1 << 31;
     pub const SHARED_PERMS: u32 = CHANGE_HAT | CHANGE_PROFILE;
 
@@ -261,6 +262,9 @@ pub struct Profile {
     pub exec_table: [Option<Vec<u8>>; perm::EXEC_COUNT],
     pub uses_prompt: bool,
     pub span: Span,
+    /// Filled in by the compiler.
+    pub xmatch: Option<(super::compile::dfa::Dfa, usize)>,
+    pub file_dfa: Option<super::compile::dfa::Dfa>,
 }
 
 impl Profile {
@@ -281,6 +285,8 @@ impl Profile {
             exec_table: Default::default(),
             uses_prompt: false,
             span,
+            xmatch: None,
+            file_dfa: None,
         }
     }
 

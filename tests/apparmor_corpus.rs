@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use quantycore::apparmor::{check, FsResolver};
+use quantycore::apparmor::{check, FsResolver, Options};
 
 /// Ubuntu 115, Debian 116, upstream 198, containers 6 at the pinned
 /// versions.
@@ -39,6 +39,7 @@ fn corpus() {
     let corpus = PathBuf::from(corpus);
     let mut checked = 0;
     let mut failed = Vec::new();
+    let opts = Options::default();
     for root in ROOTS {
         let base = corpus.join(root).join("etc/apparmor.d");
         for path in profiles(&base) {
@@ -49,7 +50,7 @@ fn corpus() {
                 .unwrap()
                 .to_string_lossy()
                 .into_owned();
-            if let Err(e) = check(&mut resolver, &name, text) {
+            if let Err(e) = check(&mut resolver, &name, text, &opts) {
                 failed.push(format!("{e}"));
             }
             checked += 1;

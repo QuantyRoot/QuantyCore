@@ -14,7 +14,7 @@
 
 use std::path::{Path, PathBuf};
 
-use quantycore::apparmor::{check, FsResolver};
+use quantycore::apparmor::{check, Features, FsResolver, Options};
 
 /// Cases marked TODO are ones upstream knows it gets wrong. The reference
 /// is what upstream does, not what it would like to do, so for those the
@@ -25,7 +25,7 @@ const TODO_INVERTED: bool = true;
 const DIFFERS_ON_PURPOSE: &[(&str, &str)] = &[];
 
 /// Refusals that later stages will add. Lowered with each stage.
-const MAX_PENDING: usize = 13_754;
+const MAX_PENDING: usize = 2_213;
 
 /// The suite at the pinned commit has 73737 cases; fewer means the
 /// checkout or the generation step went wrong.
@@ -98,6 +98,15 @@ fn simple_tests() {
     };
     let tst = PathBuf::from(tst);
     let root = tst.join("simple_tests");
+    // Upstream's harness passes -M features_files/features.all, which
+    // sets the kernel's features and pins the policy's.
+    let feats = std::fs::read(tst.join("features_files/features.all")).unwrap();
+    let feats = Features::from_text(&feats).unwrap();
+    let opts = Options {
+        kernel_features: feats.clone(),
+        policy_features: Some(feats),
+        ..Options::default()
+    };
     let mut paths = Vec::new();
     walk(&root, &mut paths);
     paths.sort();
@@ -122,7 +131,7 @@ fn simple_tests() {
             case.expect_pass
         };
         let mut resolver = FsResolver::new(vec![root.clone()], tst.clone());
-        let result = check(&mut resolver, "stdin", case.body);
+        let result = check(&mut resolver, "stdin", case.body, &opts);
         checked += 1;
         if DIFFERS_ON_PURPOSE.iter().any(|(p, _)| *p == rel) {
             on_purpose_seen += 1;

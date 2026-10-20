@@ -8,28 +8,172 @@
 
 use super::ast::{self, ExecMode, Item, ProfileKeyword};
 use super::eval::Symtab;
+use super::features::{Features, DEFAULT_ABI};
 use super::model::{perm::*, *};
-use super::source::{Error, Sources, Span};
+use super::source::{Error, Opened, Resolver, Sources, Span};
 use super::tables;
+
+struct CapEntry {
+    name: Vec<u8>,
+    cap: u32,
+    backmap: Option<u32>,
+    in_kernel: bool,
+}
 
 pub(crate) struct Builder<'s> {
     pub sources: &'s Sources,
     pub symtab: Symtab,
     pub aliases: Vec<(Vec<u8>, Vec<u8>)>,
-    pub abi: Vec<ast::Abi>,
     pub warnings: Vec<Error>,
+    kernel: Features,
+    /// Fixed by the caller (upstream's -M), else None.
+    pinned: Option<Features>,
+    policy: Option<Features>,
+    caps: Vec<CapEntry>,
+    abi_rules: Vec<ast::Abi>,
 }
 
 type R<T> = Result<T, Error>;
 
 impl<'s> Builder<'s> {
-    pub(crate) fn new(sources: &'s Sources) -> Builder<'s> {
-        Builder {
+    pub(crate) fn new(
+        sources: &'s Sources,
+        kernel: Features,
+        pinned: Option<Features>,
+    ) -> Builder<'s> {
+        let mut b = Builder {
             sources,
             symtab: Symtab::default(),
             aliases: Vec::new(),
-            abi: Vec::new(),
             warnings: Vec::new(),
+            kernel,
+            pinned,
+            policy: None,
+            caps: tables::CAPABILITIES
+                .iter()
+                .map(|&(n, cap, backmap)| CapEntry {
+                    name: n.to_vec(),
+                    cap,
+                    backmap,
+                    in_kernel: false,
+                })
+                .collect(),
+            abi_rules: Vec::new(),
+        };
+        let k = b.kernel.clone();
+        b.add_caps(&k, true);
+        b
+    }
+
+    /// upstream's add_cap_feature_mask: a feature set's capability mask
+    /// numbers its names by position. A known name at another number is
+    /// ignored; an unknown one is added, with backmap 0, which upstream's
+    /// table sets for every added entry.
+    fn add_caps(&mut self, f: &Features, kernel: bool) {
+        let Some(v) = f.value("caps/mask") else {
+            return;
+        };
+        for (n, w) in v
+            .split(|c| c.is_ascii_whitespace())
+            .filter(|w| !w.is_empty())
+            .enumerate()
+        {
+            let n = n as u32;
+            match self.caps.iter_mut().find(|e| e.name == w) {
+                Some(e) => {
+                    if e.cap == n && kernel {
+                        e.in_kernel = true;
+                    }
+                }
+                None => self.caps.push(CapEntry {
+                    name: w.to_vec(),
+                    cap: n,
+                    backmap: Some(0),
+                    in_kernel: kernel,
+                }),
+            }
+        }
+    }
+
+    /// A capability rule's number. The backmap and kernel flag are looked
+    /// up by number, finding the first entry with it, as upstream's maps
+    /// keep the first insert.
+    fn capability(&self, name: &[u8]) -> Option<u32> {
+        let cap = self.caps.iter().find(|e| e.name == name)?.cap;
+        let by_num = self.caps.iter().find(|e| e.cap == cap);
+        match by_num {
+            Some(&CapEntry {
+                backmap: Some(b),
+                in_kernel: false,
+                ..
+            }) => Some(b),
+            _ => Some(cap),
+        }
+    }
+
+    /// The features a profile is compiled against: the kernel's, as far
+    /// as the policy's abi allows.
+    pub(crate) fn policy_features(&self) -> Features {
+        self.policy.clone().expect("set after the preamble")
+    }
+
+    pub(crate) fn support(&self, limits: super::compile::dfa::Limits) -> super::compile::Support {
+        let p = self.policy_features();
+        let both = |f: &str| self.kernel.supports(f) && p.supports(f);
+        let permstable = if self.kernel.supports("policy/permstable32") {
+            if self.kernel.supports("policy/permstable32_version/0x000003") {
+                3
+            } else if self.kernel.supports("policy/permstable32_version/0x000002") {
+                2
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+        super::compile::Support {
+            stacking: both("domain/stack"),
+            domain_xattr: both("domain/attach_conditions/xattr"),
+            oob: self.kernel.supports("policy/outofband"),
+            permstable32_version: permstable,
+            limits,
+        }
+    }
+
+    /// Loads the feature set an `abi` rule names.
+    fn abi_features(&self, a: &ast::Abi, resolver: &mut dyn Resolver) -> R<Features> {
+        let shown = String::from_utf8_lossy(&a.name).into_owned();
+        let text = if a.search {
+            if a.name == b"kernel" {
+                return Ok(self.kernel.clone());
+            }
+            if a.name == b"default" {
+                return Ok(Features::from_text(DEFAULT_ABI.as_bytes()).expect("default abi"));
+            }
+            let mut found = None;
+            for dir in resolver.search_path().to_vec() {
+                let mut full = dir;
+                full.push(b'/');
+                full.extend_from_slice(&a.name);
+                match resolver.open(&full) {
+                    Opened::NotFound => continue,
+                    o => {
+                        found = Some(o);
+                        break;
+                    }
+                }
+            }
+            found
+        } else {
+            match resolver.open(&a.name) {
+                Opened::NotFound => None,
+                o => Some(o),
+            }
+        };
+        match text {
+            None => Err(self.err(a.span, format!("Could not open '{shown}'"))),
+            Some(Opened::File(t)) => Features::from_text(&t).map_err(|m| self.err(a.span, m)),
+            Some(_) => Err(self.err(a.span, format!("failed to find features abi '{shown}'"))),
         }
     }
 
@@ -42,7 +186,7 @@ impl<'s> Builder<'s> {
         self.warnings.push(e);
     }
 
-    pub(crate) fn file(&mut self, f: &ast::File) -> R<Policy> {
+    pub(crate) fn file(&mut self, f: &ast::File, resolver: &mut dyn Resolver) -> R<Policy> {
         for p in &f.preamble {
             match p {
                 ast::Preamble::Alias { from, to, .. } => {
@@ -66,15 +210,31 @@ impl<'s> Builder<'s> {
                     .symtab
                     .assign_bool(name, *op, expr)
                     .map_err(|m| self.err(*span, m))?,
-                ast::Preamble::Abi(a) => self.abi.push(a.clone()),
+                ast::Preamble::Abi(a) => {
+                    let feats = self.abi_features(a, resolver)?;
+                    if self.policy.is_none() {
+                        self.policy = Some(feats);
+                    }
+                }
             }
         }
+        if self.policy.is_none() {
+            self.policy = Some(match &self.pinned {
+                Some(p) => p.clone(),
+                None => Features::from_text(DEFAULT_ABI.as_bytes()).expect("default abi"),
+            });
+        }
+        let pf = self.policy_features();
+        self.add_caps(&pf, false);
         let mut policy = Policy {
             aliases: self.aliases.clone(),
             ..Policy::default()
         };
         for p in &f.profiles {
             let prof = self.profile(p, false)?;
+            for a in std::mem::take(&mut self.abi_rules) {
+                self.abi_features(&a, resolver)?;
+            }
             if prof.ns.is_none()
                 && prof.name.first() != Some(&b'/')
                 && p.keyword == ProfileKeyword::None
@@ -216,7 +376,7 @@ impl<'s> Builder<'s> {
     fn item(&mut self, prof: &mut Profile, item: &Item) -> R<()> {
         match item {
             Item::Abi(a) => {
-                self.abi.push(a.clone());
+                self.abi_rules.push(a.clone());
                 Ok(())
             }
             Item::Rule { prefix, rule, span } => {
@@ -456,7 +616,7 @@ impl<'s> Builder<'s> {
                 }
                 let mut set = 0u64;
                 for (n, nspan) in names {
-                    let Some((cap, _backmap)) = tables::capability(n) else {
+                    let Some(cap) = self.capability(n) else {
                         return Err(self.err(
                             *nspan,
                             format!("Invalid capability {}.", String::from_utf8_lossy(n)),

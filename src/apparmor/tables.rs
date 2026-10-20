@@ -49,13 +49,6 @@ pub(crate) const CAPABILITIES: &[(&[u8], u32, Option<u32>)] = &[
     (b"wake_alarm", 35, None),
 ];
 
-pub(crate) fn capability(name: &[u8]) -> Option<(u32, Option<u32>)> {
-    CAPABILITIES
-        .iter()
-        .find(|(n, _, _)| *n == name)
-        .map(|&(_, c, b)| (c, b))
-}
-
 pub(crate) const RLIMIT_CPU: u32 = 0;
 pub(crate) const RLIMIT_FSIZE: u32 = 1;
 pub(crate) const RLIMIT_DATA: u32 = 2;
