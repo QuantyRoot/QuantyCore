@@ -11,6 +11,7 @@ through and add a new entry, never silently edit history.
 - [ADR-004](#adr-004-the-wire-protocols-live-here-in-one-crate) The wire protocols live here, in one crate
 - [ADR-005](#adr-005-apache-20) Apache 2.0
 - [ADR-006](#adr-006-http2-and-grpc-on-blocking-threads-hardened-for-local-peers-first) HTTP/2 and gRPC on blocking threads, hardened for local peers first
+- [ADR-007](#adr-007-gzip-and-tar-stream-with-fixed-memory-and-accept-what-zlib-accepts) gzip and tar stream with fixed memory, and accept what zlib accepts
 
 ## ADR-001: Nothing outside the standard library, and QuantyRoot is not outside
 
@@ -228,3 +229,37 @@ with one trusted client and all of it matters on a network:
 the point where that happens (ADR-003), so these four come before any
 listener that accepts a connection from another machine, and that rule is
 the reason this record exists.
+
+## ADR-007: gzip and tar stream with fixed memory, and accept what zlib accepts
+
+QuantyKube's node runtime unpacks OCI image layers, which are gzip
+compressed tar archives from a registry nobody here controls. Both
+readers are written here (`inflate.rs`, `tar.rs`), streaming, so a layer
+is unpacked as it arrives and never held whole.
+
+**Memory is fixed per reader,** a 64 KiB ring, a 32 KiB input buffer and
+the Huffman tables for gzip, and capped long names and PAX records for
+tar. A hostile layer can cost time in proportion to its size and nothing
+else. Errors poison the gzip reader, so a caller cannot read on past
+corruption by accident.
+
+**Where to be strict.** Every check that protects the unpacker is
+strict: CRC and length trailers, header checksums, truncation anywhere,
+over-subscribed codes, distances before the start. Where RFC 1951 is
+stricter than the decoders the ecosystem uses, this follows them: a
+literal code with a single one bit symbol is accepted, as zlib and Go
+accept it, because refusing a layer that containerd unpacks without
+complaint protects nothing. Bytes after the last gzip member are an
+error, as they are for Go's reader, which containerd uses.
+
+**What the caller must do,** and the runtime will: read the gzip stream
+to its end even after tar reports the last entry, since the trailer is
+checked only there; handle OCI whiteout files; and reject entry paths
+with `safe_relative`, since a `..` in a layer path is the oldest
+container escape there is.
+
+**Measured:** about 195 MB/s decompressing, against 130 to 170 MB/s for
+`gzip -dc` on the same machine. Tests compare against Python's zlib,
+the gzip command and GNU tar in all three formats, and each was shown to
+fail when the code was broken on purpose.
+

@@ -16,7 +16,9 @@ on the Rust standard library.
 | Protobuf wire format: reading and writing messages | built, tested |
 | HPACK: decoder with dynamic table, stateless encoder | built, tested |
 | HTTP/2, server side, sans I/O | built, tested |
-| gRPC server on blocking sockets | built, tested |
+| gRPC server on blocking sockets, unary client | built, tested |
+| gzip and DEFLATE, streaming | built, tested |
+| tar: ustar, GNU, PAX, streaming | built, tested |
 | TLS 1.3 | planned, see below |
 
 Planned means no code exists yet.
