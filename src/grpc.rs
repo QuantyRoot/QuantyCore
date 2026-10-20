@@ -448,6 +448,85 @@ fn end_of_requests(
     }
 }
 
+/// One unary call on a connection of its own. Meant for command line
+/// tools, which make a call or two and exit.
+pub fn call<S: Read + Write>(mut sock: S, method: &str, request: &[u8]) -> Result<Vec<u8>, Status> {
+    let io = |e: std::io::Error| Status::new(code::UNAVAILABLE, e.to_string());
+    let mut conn = Connection::client(Settings::default());
+    let id = conn.start_request(
+        &[
+            (b":method", b"POST", false),
+            (b":scheme", b"http", false),
+            (b":path", method.as_bytes(), false),
+            (b":authority", b"localhost", false),
+            (b"content-type", b"application/grpc", false),
+            (b"te", b"trailers", false),
+        ],
+        false,
+    );
+    conn.send_data(id, &frame_message(request), true);
+    let mut body = Deframer::default();
+    let mut msgs = Vec::new();
+    let (mut status, mut message) = (None, String::new());
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        sock.write_all(&conn.take_output()).map_err(io)?;
+        let n = sock.read(&mut buf).map_err(io)?;
+        if n == 0 {
+            return Err(Status::new(code::UNAVAILABLE, "connection closed mid call"));
+        }
+        let events = conn
+            .recv(&buf[..n])
+            .map_err(|e| Status::new(code::INTERNAL, e.to_string()))?;
+        for ev in events {
+            let end = match ev {
+                Event::Headers {
+                    stream,
+                    headers,
+                    end_stream,
+                } if stream == id => {
+                    for h in headers {
+                        match h.name.as_slice() {
+                            b"grpc-status" => {
+                                status = std::str::from_utf8(&h.value)
+                                    .ok()
+                                    .and_then(|v| v.parse().ok())
+                            }
+                            b"grpc-message" => message = String::from_utf8_lossy(&h.value).into(),
+                            _ => {}
+                        }
+                    }
+                    end_stream
+                }
+                Event::Data {
+                    stream,
+                    data,
+                    end_stream,
+                } if stream == id => {
+                    msgs.extend(body.push(&data)?);
+                    end_stream
+                }
+                Event::Reset { stream, code } if stream == id => {
+                    return Err(Status::new(
+                        code::UNAVAILABLE,
+                        format!("stream reset ({code})"),
+                    ))
+                }
+                _ => false,
+            };
+            if end {
+                return match status {
+                    Some(code::OK) => msgs
+                        .pop()
+                        .ok_or_else(|| Status::new(code::INTERNAL, "no response message")),
+                    Some(c) => Err(Status::new(c, message)),
+                    None => Err(Status::new(code::INTERNAL, "response without grpc-status")),
+                };
+            }
+        }
+    }
+}
+
 /// Accepts connections on a Unix socket forever, one thread each.
 pub fn serve_unix(
     listener: std::os::unix::net::UnixListener,
@@ -576,6 +655,22 @@ mod tests {
         assert_eq!(get("grpc-status"), Some("12"));
         assert_eq!(get("grpc-message"), Some("no such method: 100%25"));
         assert_eq!(get(":status"), Some("200"));
+    }
+
+    #[test]
+    fn the_client_side_talks_to_the_server_side() {
+        let (client, server) = UnixStream::pair().unwrap();
+        let pool = Pool::new(1);
+        std::thread::spawn(move || serve_connection(server, Arc::new(Echo), pool));
+        let big = vec![7u8; 200_000];
+        assert_eq!(super::call(&client, "/test.Echo/Say", &big), Ok(big));
+        let (client, server) = UnixStream::pair().unwrap();
+        std::thread::spawn(move || serve_connection(server, Arc::new(Echo), Pool::new(1)));
+        let err = super::call(&client, "/test.Echo/Nope", b"").unwrap_err();
+        assert_eq!(
+            (err.code, err.message.as_str()),
+            (code::UNIMPLEMENTED, "no such method: 100%25")
+        );
     }
 
     #[test]

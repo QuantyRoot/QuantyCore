@@ -1,4 +1,4 @@
-//! HTTP/2 (RFC 9113), server side, without I/O: bytes from the socket go
+//! HTTP/2 (RFC 9113) without I/O: bytes from the socket go
 //! into [`Connection::recv`], which returns what happened, and whatever the
 //! connection wants sent waits in [`Connection::take_output`]. Threads,
 //! sockets and timeouts belong to the caller.
@@ -113,6 +113,8 @@ enum Item {
 }
 
 struct Stream {
+    /// false only on a client stream whose response has not started
+    headers_seen: bool,
     send_window: i64,
     queue: VecDeque<Item>,
     remote_closed: bool,
@@ -140,10 +142,23 @@ pub struct Connection {
     unacked: HashMap<u32, i64>,
     continuation: Option<PendingHeaders>,
     closed: bool,
+    client: bool,
+    next_stream: u32,
 }
 
 impl Connection {
     pub fn server(local: Settings) -> Self {
+        Self::new(local, false)
+    }
+
+    /// The client side, for calls this process makes. Server push is
+    /// refused, so the only streams are the ones [`Self::start_request`]
+    /// opens.
+    pub fn client(local: Settings) -> Self {
+        Self::new(local, true)
+    }
+
+    fn new(local: Settings, client: bool) -> Self {
         let mut c = Connection {
             local,
             peer: Settings {
@@ -168,7 +183,13 @@ impl Connection {
             unacked: HashMap::new(),
             continuation: None,
             closed: false,
+            client,
+            next_stream: 1,
         };
+        if client {
+            c.out.extend_from_slice(PREFACE);
+            c.seen_preface = true;
+        }
         let mut payload = Vec::new();
         for (id, v) in [
             (0x1, local.header_table_size),
@@ -317,7 +338,7 @@ impl Connection {
                 if payload.len() != 4 {
                     return Err(frame_size("RST_STREAM length"));
                 }
-                if stream > self.last_peer_stream && stream % 2 == 1 {
+                if self.idle(stream) {
                     return Err(protocol("RST_STREAM on an idle stream"));
                 }
                 let code = u32::from_be_bytes(payload.try_into().unwrap());
@@ -376,7 +397,7 @@ impl Connection {
         let data = unpad(flags, payload)?;
         let open = matches!(self.streams.get(&stream), Some(s) if !s.remote_closed);
         if !open {
-            if stream > self.last_peer_stream {
+            if self.idle(stream) {
                 return Err(protocol("DATA on an idle stream"));
             }
             self.reset(stream, code::STREAM_CLOSED);
@@ -447,15 +468,20 @@ impl Connection {
             reason: "header block does not decode",
         })?;
         let stream = p.stream;
-        match self.streams.get(&stream) {
+        match self.streams.get_mut(&stream) {
             Some(s) if !s.remote_closed => {
-                if !p.end_stream {
+                if !s.headers_seen {
+                    s.headers_seen = true;
+                } else if !p.end_stream {
                     return Err(protocol("trailers without END_STREAM"));
                 }
             }
             Some(_) => {
                 self.reset(stream, code::STREAM_CLOSED);
                 return Ok(());
+            }
+            None if self.client => {
+                return Err(protocol("HEADERS on a stream this client never opened"));
             }
             None => {
                 if stream.is_multiple_of(2) || stream <= self.last_peer_stream {
@@ -469,6 +495,7 @@ impl Connection {
                 self.streams.insert(
                     stream,
                     Stream {
+                        headers_seen: true,
                         send_window: i64::from(self.peer.initial_window_size),
                         queue: VecDeque::new(),
                         remote_closed: false,
@@ -562,7 +589,7 @@ impl Connection {
             self.flush_all();
             return Ok(());
         }
-        if stream > self.last_peer_stream && stream % 2 == 1 {
+        if self.idle(stream) {
             return Err(protocol("WINDOW_UPDATE on an idle stream"));
         }
         let Some(s) = self.streams.get_mut(&stream) else {
@@ -579,6 +606,33 @@ impl Connection {
         }
         self.flush(stream);
         Ok(())
+    }
+
+    fn idle(&self, stream: u32) -> bool {
+        if self.client {
+            stream >= self.next_stream
+        } else {
+            stream > self.last_peer_stream && stream % 2 == 1
+        }
+    }
+
+    /// Opens a stream with a request's header block. Client side only.
+    pub fn start_request(&mut self, headers: &[(&[u8], &[u8], bool)], end_stream: bool) -> u32 {
+        assert!(self.client, "only a client opens streams");
+        let id = self.next_stream;
+        self.next_stream += 2;
+        self.streams.insert(
+            id,
+            Stream {
+                headers_seen: false,
+                send_window: i64::from(self.peer.initial_window_size),
+                queue: VecDeque::new(),
+                remote_closed: false,
+                local_closed: false,
+            },
+        );
+        self.send_headers(id, headers, end_stream);
+        id
     }
 
     fn remote_end(&mut self, stream: u32) {
