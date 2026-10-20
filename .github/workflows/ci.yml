@@ -125,3 +125,35 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.0
       - name: timing of every secret handling primitive
         run: cargo test --release --test tls_timing -- --ignored --test-threads 1 --nocapture
+
+  # Real sockets against OpenSSL and Go, both directions, with and without
+  # client certificates, using certificates issued by this crate.
+  tls-interop:
+    name: TLS against OpenSSL and Go crypto/tls
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+      - name: handshakes and data with openssl and Go
+        run: cargo test --release --test tls_interop -- --ignored --test-threads 1 --nocapture
+      - name: chains issued here, verified by openssl
+        run: |
+          mkdir -p "$RUNNER_TEMP/ours"
+          QUANTY_DUMP="$RUNNER_TEMP/ours" cargo test --release --lib dump_for_openssl -- --ignored
+          cd "$RUNNER_TEMP/ours"
+          openssl verify -CAfile root.pem -untrusted inter.pem -attime 1800000000 leaf.pem
+      - name: chains issued by openssl, verified here
+        run: |
+          d="$RUNNER_TEMP/theirs"; mkdir -p "$d"; cd "$d"
+          openssl genpkey -algorithm ed25519 -out ca.key
+          openssl req -x509 -new -key ca.key -subj "/CN=OpenSSL Root" -days 30 \
+            -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign" -out ca.pem
+          openssl genpkey -algorithm ed25519 -out leaf.key
+          openssl req -new -key leaf.key -subj "/CN=leaf" -out leaf.csr
+          printf "basicConstraints=CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:svc.example.test\n" > ext.cnf
+          openssl x509 -req -in leaf.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 30 -extfile ext.cnf -out leaf.pem
+          cd "$GITHUB_WORKSPACE"
+          QUANTY_OPENSSL_CHAIN="$d" cargo test --release --lib verify_openssl_chain -- --ignored

@@ -3,6 +3,9 @@
 
 use super::crypto::ed25519;
 use super::error::{alert, Error};
+use super::x509::cert::{oid, Spki};
+use super::x509::der::Der;
+use super::x509::CertError;
 
 pub mod scheme {
     pub const RSA_PKCS1_SHA256: u16 = 0x0401;
@@ -27,6 +30,45 @@ pub enum PublicKey {
 }
 
 impl PublicKey {
+    /// The key in a certificate. Algorithms this crate cannot verify yet
+    /// are refused here, so a chain that needs one fails as unsupported
+    /// instead of later as a bad signature.
+    pub fn from_spki(spki: &Spki) -> Result<PublicKey, CertError> {
+        match spki.algorithm.as_slice() {
+            oid::ED25519 => {
+                if spki.curve.is_some() {
+                    return Err(CertError::Malformed("Ed25519 key with parameters"));
+                }
+                let k: [u8; 32] = spki
+                    .key
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| CertError::Malformed("Ed25519 key length"))?;
+                Ok(PublicKey::Ed25519(k))
+            }
+            _ => Err(CertError::UnsupportedAlgorithm),
+        }
+    }
+
+    /// Checks a certificate's signature made with this key.
+    /// `algorithm` is the certificate's AlgorithmIdentifier as DER.
+    pub fn verify_x509(&self, algorithm: &[u8], tbs: &[u8], sig: &[u8]) -> Result<(), CertError> {
+        let mut outer = Der::new(algorithm);
+        let mut alg = outer.sequence().map_err(|e| CertError::Malformed(e.0))?;
+        let id = alg.oid().map_err(|e| CertError::Malformed(e.0))?;
+        let has_params = !alg.is_empty();
+        let ok = match (self, id) {
+            (PublicKey::Ed25519(k), oid::ED25519) if !has_params => ed25519::verify(k, tbs, sig),
+            (_, oid::ED25519) => return Err(CertError::BadSignature),
+            _ => return Err(CertError::UnsupportedAlgorithm),
+        };
+        if ok {
+            Ok(())
+        } else {
+            Err(CertError::BadSignature)
+        }
+    }
+
     /// The schemes this key can verify in TLS 1.3. RSA PKCS#1 v1.5 is not
     /// among them for handshake signatures (RFC 8446 4.2.3).
     pub fn tls13_schemes(&self) -> &'static [u16] {

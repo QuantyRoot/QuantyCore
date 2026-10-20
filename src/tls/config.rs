@@ -1,11 +1,5 @@
 //! Configuration of clients and servers. Safe by default: TLS 1.3 only,
 //! certificates always verified, and no setting that weakens either.
-//!
-//! The constructors take a certificate verifier or a signer, which stay
-//! crate-internal until X.509 validation exists to build the real ones.
-//! Until then nothing outside the tests constructs a configuration.
-
-#![cfg_attr(not(test), allow(dead_code))]
 
 use super::auth::{PeerVerifier, Signer};
 use super::crypto::aead::Aead;
@@ -14,6 +8,7 @@ use super::crypto::ct::Secret;
 use super::crypto::rand;
 use super::kx;
 use super::suites::{self, Suite};
+use super::x509::{PrivateKey, RootStore, Usage, Verifier};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
@@ -80,6 +75,22 @@ pub struct ClientConfig {
 }
 
 impl ClientConfig {
+    /// A client that trusts the roots in `roots`, for example
+    /// `RootStore::system()`. Every server certificate is validated
+    /// against them and against the name passed to the connection.
+    pub fn new(roots: RootStore) -> ClientConfig {
+        ClientConfig::with_verifier(Arc::new(Verifier {
+            roots: Arc::new(roots),
+            usage: Usage::Server,
+        }))
+    }
+
+    /// Presents `chain` (leaf first) and signs with `key` when a server
+    /// asks for a client certificate.
+    pub fn set_client_certificate(&mut self, chain: Vec<Vec<u8>>, key: PrivateKey) {
+        self.client_cert = Some((chain, Arc::new(key)));
+    }
+
     pub(crate) fn with_verifier(verifier: Arc<dyn PeerVerifier>) -> ClientConfig {
         ClientConfig {
             suites: suites::ALL_TLS13.to_vec(),
@@ -102,7 +113,8 @@ impl ClientConfig {
         self.tickets = None;
     }
 
-    pub(crate) fn set_client_certificate(&mut self, chain: Vec<Vec<u8>>, key: Arc<dyn Signer>) {
+    #[cfg(test)]
+    pub(crate) fn set_client_signer(&mut self, chain: Vec<Vec<u8>>, key: Arc<dyn Signer>) {
         self.client_cert = Some((chain, key));
     }
 }
@@ -144,6 +156,20 @@ pub struct ServerConfig {
 }
 
 impl ServerConfig {
+    /// A server presenting `chain` (leaf first) and signing with `key`.
+    pub fn new(chain: Vec<Vec<u8>>, key: PrivateKey) -> std::io::Result<ServerConfig> {
+        ServerConfig::with_signer(chain, Arc::new(key))
+    }
+
+    /// Requires every client to present a certificate that chains to
+    /// `roots` and is valid for client authentication.
+    pub fn require_client_certificates(&mut self, roots: RootStore) {
+        self.client_auth = ClientAuth::Required(Arc::new(Verifier {
+            roots: Arc::new(roots),
+            usage: Usage::Client,
+        }));
+    }
+
     /// ChaCha20-Poly1305 comes first because it is the faster cipher here
     /// (ADR-021).
     pub(crate) fn with_signer(
@@ -177,7 +203,8 @@ impl ServerConfig {
         self.tickets = None;
     }
 
-    pub(crate) fn require_client_certificates(&mut self, verifier: Arc<dyn PeerVerifier>) {
+    #[cfg(test)]
+    pub(crate) fn require_client_verifier(&mut self, verifier: Arc<dyn PeerVerifier>) {
         self.client_auth = ClientAuth::Required(verifier);
     }
 }

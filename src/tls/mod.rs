@@ -17,10 +17,13 @@ pub mod msgs;
 pub mod record;
 mod rfc8448;
 mod server;
+mod stream;
 pub mod suites;
+pub mod x509;
 
 pub use client::ClientConnection;
 pub use config::{ClientConfig, ServerConfig};
 pub use conn::Connection;
 pub use error::Error;
 pub use server::ServerConnection;
+pub use stream::Stream;

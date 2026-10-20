@@ -550,11 +550,95 @@ MUTANTS = [
         "    let mut acc = 0u8;\n    for (x, y) in a.iter().zip(b) {\n        if x != y {\n            return false;\n        }\n        acc |= x ^ y;\n    }",
         TIMING, "ct_eq", [],
     ),
+    (
+        "x509: expiry not checked",
+        "src/tls/x509/path.rs",
+        "    if now > c.not_after {",
+        "    if false {",
+        UNIT, "time_bounds", [],
+    ),
+    (
+        "x509: no limit on path search",
+        "src/tls/x509/path.rs",
+        "        if self.budget == 0 {",
+        "        if false {",
+        UNIT, "wide_search_hits_the_signature_budget", [],
+    ),
+    (
+        "x509: no limit on path depth",
+        "src/tls/x509/path.rs",
+        "        if path.len() >= MAX_INTERMEDIATES {",
+        "        if false {",
+        UNIT, "a_path_longer_than_six_is_refused", [],
+    ),
+    (
+        "x509: path length not enforced",
+        "src/tls/x509/path.rs",
+        "            if below > n {",
+        "            if false {",
+        UNIT, "purpose_and_path_length", [],
+    ),
+    (
+        "x509: issuer may lack keyCertSign",
+        "src/tls/x509/path.rs",
+        "ku & key_usage::KEY_CERT_SIGN == 0",
+        "ku & key_usage::KEY_CERT_SIGN == 1",
+        UNIT, "an_issuer_without_key_cert_sign", [],
+    ),
+    (
+        "x509: leaf purpose not checked",
+        "src/tls/x509/path.rs",
+        "        if !eku.iter().any(|e| e == usage.eku()) {",
+        "        if false {",
+        UNIT, "purpose_and_path_length", [],
+    ),
+    (
+        "x509: CA accepted as end entity",
+        "src/tls/x509/path.rs",
+        "    if leaf.ca.is_some_and(|(ca, _)| ca) {",
+        "    if false {",
+        UNIT, "issuers_must_be_trusted_cas", [],
+    ),
+    (
+        "x509: wildcard may cover an excluded name",
+        "src/tls/x509/name.rs",
+        "dns_in_subtree(x, b) || wildcard_reaches(x, b)",
+        "dns_in_subtree(x, b)",
+        UNIT, "x509::tests::name_constraints", [],
+    ),
+    (
+        "x509: wildcard over a single label",
+        "src/tls/x509/name.rs",
+        "        if base.split('.').count() < 2 {",
+        "        if base.split('.').count() < 1 {",
+        UNIT, "wildcards_per_rfc_6125", [],
+    ),
+    (
+        "x509: signature algorithms may disagree",
+        "src/tls/x509/cert.rs",
+        "        if inner_alg != sig_alg {",
+        "        if false {",
+        UNIT, "parser_refuses_what_rfc_5280_forbids", [],
+    ),
+    (
+        "x509: duplicate extensions accepted",
+        "src/tls/x509/cert.rs",
+        "            if seen.contains(&id) {",
+        "            if false {",
+        UNIT, "parser_refuses_what_rfc_5280_forbids", [],
+    ),
+    (
+        "x509: unknown critical extension ignored",
+        "src/tls/x509/cert.rs",
+        '                _ if critical => return Err(DerError("unknown critical extension")),\n',
+        "",
+        UNIT, "parser_refuses_what_rfc_5280_forbids", [],
+    ),
 ]
 
 
 def run(cmd, env):
-    return subprocess.run(cmd, cwd=ROOT, env=env, capture_output=True, text=True)
+    return subprocess.run(cmd, cwd=ROOT, env=env, capture_output=True, text=True, timeout=900)
 
 
 def main():
@@ -585,7 +669,12 @@ def main():
         try:
             start = time.time()
             extra = ["--", "--ignored"] if args is TIMING else []
-            r = run(["cargo", "test", *args, test, *extra], env)
+            try:
+                r = run(["cargo", "test", *args, test, *extra], env)
+            except subprocess.TimeoutExpired:
+                killed += 1
+                print(f"ok    {name}: {test} did not finish in time")
+                continue
             out = r.stdout + r.stderr
             if r.returncode == 0:
                 print(f"FAIL  {name}: {test} stayed green")

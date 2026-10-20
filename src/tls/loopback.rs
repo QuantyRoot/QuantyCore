@@ -178,12 +178,11 @@ fn mutual_authentication() {
     let mut p = pair();
     let client_key = Arc::new(SigningKey::from_seed(&[9; 32]));
     let cpk = client_key.public_key();
-    p.server.require_client_certificates(Arc::new(KeyVerifier {
+    p.server.require_client_verifier(Arc::new(KeyVerifier {
         key: cpk,
         name: None,
     }));
-    p.client
-        .set_client_certificate(vec![cpk.to_vec()], client_key);
+    p.client.set_client_signer(vec![cpk.to_vec()], client_key);
     let (c, s) = connect(p.client, p.server);
     assert!(!c.is_handshaking());
     assert_eq!(s.peer_certificates().unwrap()[0], cpk);
@@ -192,7 +191,7 @@ fn mutual_authentication() {
 #[test]
 fn missing_client_certificate_is_refused() {
     let mut p = pair();
-    p.server.require_client_certificates(Arc::new(KeyVerifier {
+    p.server.require_client_verifier(Arc::new(KeyVerifier {
         key: [1; 32],
         name: None,
     }));

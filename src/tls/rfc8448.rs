@@ -529,7 +529,7 @@ fn client_path(t: &[Step]) -> usize {
             .into_iter()
             .map(|e| e.der)
             .collect();
-        config.set_client_certificate(
+        config.set_client_signer(
             chain,
             Arc::new(TraceSigner {
                 scheme: cv.scheme,

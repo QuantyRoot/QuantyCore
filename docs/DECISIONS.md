@@ -18,6 +18,7 @@ through and add a new entry, never silently edit history.
 - [ADR-021](#adr-021-aead-built-for-constant-time-not-speed) AEAD built for constant time, not speed
 - [ADR-022](#adr-022-the-tls-13-handshake-sans-io-compatibility-mode-stateless-tickets) The TLS 1.3 handshake: sans I/O, compatibility mode, stateless tickets
 - [ADR-023](#adr-023-constant-time-is-measured-not-assumed) Constant time is measured, not assumed
+- [ADR-024](#adr-024-x509-validation-like-webpki-not-like-a-browser) X.509 validation like webpki, not like a browser
 
 ## ADR-001: Nothing outside the standard library, and QuantyRoot is not outside
 
@@ -535,3 +536,52 @@ and why a review is still required before anything is called secure.
 **Cost.** A CI job of a few minutes. Shared runners are noisy, so a
 primitive only fails when two consecutive runs cross the threshold; a
 leak large enough to matter crosses it every time.
+
+## ADR-024: X.509 validation like webpki, not like a browser
+
+Path validation follows RFC 5280 where TLS needs it and takes the
+stricter reading where RFC 5280 leaves room, as rustls' webpki does:
+
+- Names are matched against subjectAltName only. The subject common
+  name is never used as a host name (RFC 6125 6.4.4 allows it as a
+  fallback; every current browser has dropped it). Wildcards only as the
+  whole leftmost label, standing for exactly one label, never as `*.tld`.
+- Issuers are found by the exact DER of their subject Name. RFC 5280
+  describes a normalised comparison; in practice CAs encode the issuer
+  of a certificate by copying their own subject, and byte comparison
+  cannot be tricked by two encodings that normalise to the same Name.
+- A trust anchor is a subject, a key and optional name constraints. Its
+  own validity period, key usage and path length are not checked (RFC
+  5280 6.1.1(d)), so an expired root in the system store still anchors
+  chains, as it does for OpenSSL and Go.
+- Intermediates must be v3 CAs, in their validity period, with
+  keyCertSign if KeyUsage is present and the requested purpose if
+  ExtendedKeyUsage is present. A CA certificate is refused as a leaf.
+- Name constraints are evaluated for DNS names, IP addresses and
+  directory names, including a wildcard that could stand for an excluded
+  name. Constraints of other kinds (email, URI) fail closed when the
+  certificate carries a name of that kind.
+- Unknown critical extensions are refused, which includes certificate
+  policies when marked critical: policies are not evaluated.
+- Not built: CRLs, OCSP, certificate transparency. A private cluster
+  rotates short lived certificates instead; for public servers this is
+  the same position Go's crypto/tls takes by default.
+
+**Limits against a hostile peer.** At most 32 intermediates are
+considered, paths are at most six intermediates deep, and one validation
+performs at most 64 signature checks. Two tests show that each of the
+last two limits is reached on its own: a valid chain eight deep, and two
+levels of sixteen look-alike issuers that all really sign the level
+below.
+
+**Rejected:** chain building that fetches missing intermediates over
+the network (AIA). It makes validation depend on an HTTP request made
+on behalf of the peer, and a server that sends an incomplete chain is
+misconfigured.
+
+**Checked by:** chains issued here and broken one way at a time; every
+root in the system store parsed; chains issued here verified by
+`openssl verify`, chains issued by OpenSSL verified here; and handshakes
+over real sockets against OpenSSL and Go in both directions, with and
+without client certificates. The x509-limbo suite follows once ECDSA
+exists, because nearly all of its chains are ECDSA or RSA.
