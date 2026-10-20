@@ -11,6 +11,7 @@ use super::error::{alert, Error};
 use super::key_schedule::{finished_verify_data, resumption_psk, verify_finished, KeySchedule};
 use super::kx::KxSecret;
 use super::msgs::*;
+use super::server12;
 use super::suites::{tls13_suite, Suite};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -78,7 +79,7 @@ struct ExpectClientHello {
 }
 
 /// A session restored from a ticket the client presented.
-struct Resumed {
+pub(super) struct Resumed {
     psk: Secret,
     alpn: Option<Vec<u8>>,
 }
@@ -96,6 +97,15 @@ impl State for ExpectClientHello {
         }
         let after_retry = s.retry.is_some();
         let ch = ClientHello::parse(&msg.body)?;
+        if s.config.tls12 && !after_retry && server12::wants_tls12(&s.config, &ch)? {
+            return server12::client_hello(core, s.config, ch, raw);
+        }
+        if s.config.max_tls12 {
+            return Err(Error::new(
+                alert::PROTOCOL_VERSION,
+                "client does not offer TLS 1.2",
+            ));
+        }
         let versions = read_u16_list(
             ch.ext(ext::SUPPORTED_VERSIONS).ok_or(Error::new(
                 alert::PROTOCOL_VERSION,
@@ -401,7 +411,7 @@ impl ExpectClientHello {
 /// client offered. A client offering only protocols the server does not
 /// speak is refused (RFC 7301 3.2). A resumed session must keep its
 /// protocol.
-fn choose_alpn(
+pub(super) fn choose_alpn(
     config: &ServerConfig,
     ch: &ClientHello,
     resumed: Option<&Resumed>,

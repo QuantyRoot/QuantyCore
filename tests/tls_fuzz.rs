@@ -132,7 +132,10 @@ fn mutate_with_length(rng: &mut Rng, input: &[u8]) -> Vec<u8> {
 fn mutate_extension(rng: &mut Rng, flight: &[u8], client_hello: bool) -> Vec<u8> {
     let len = u16::from_be_bytes([flight[3], flight[4]]) as usize;
     let (first, rest) = flight.split_at(5 + len);
-    let body = &first[9..];
+    // A TLS 1.2 server sends its whole flight in one record; the
+    // messages after the first stay as they are.
+    let msg_len = u32::from_be_bytes([0, first[6], first[7], first[8]]) as usize;
+    let (body, after) = first[9..].split_at(msg_len);
     let encoded = if client_hello {
         let mut m = msgs::ClientHello::parse(body).unwrap();
         let i = rng.below(m.extensions.len());
@@ -144,8 +147,10 @@ fn mutate_extension(rng: &mut Rng, flight: &[u8], client_hello: bool) -> Vec<u8>
         m.extensions[i].data = mutate_with_length(rng, &m.extensions[i].data);
         m.encode().encode()
     };
-    let mut out = vec![22, 3, 3, (encoded.len() >> 8) as u8, encoded.len() as u8];
+    let n = encoded.len() + after.len();
+    let mut out = vec![22, 3, 3, (n >> 8) as u8, n as u8];
     out.extend(encoded);
+    out.extend_from_slice(after);
     out.extend_from_slice(rest);
     out
 }
@@ -333,6 +338,100 @@ fn fuzz_client_connection() {
             mutate_extension(rng, &flight, false)
         } else {
             mutate(rng, &flight, &c.client_flight)
+        };
+        let mut rest = &input[..];
+        while !rest.is_empty() {
+            let n = 1 + rng.below(rest.len());
+            if cl.read_tls(&rest[..n]).is_err() {
+                break;
+            }
+            rest = &rest[n..];
+        }
+    });
+}
+
+/// A recorded ClientHello offering only TLS 1.2, and a server that
+/// accepts 1.2, for the targets below.
+fn corpus12(c: &Corpus) -> (Vec<u8>, Arc<ClientConfig>, Arc<ServerConfig>) {
+    let mut roots = RootStore::new();
+    roots.add_der(&c.root).unwrap();
+    let mut client = ClientConfig::new(roots);
+    client.enable_tls12();
+    let client = Arc::new(client);
+    let mut server = ServerConfig::new(
+        vec![c.certs[1].clone()],
+        PrivateKey::from_pkcs8(&c.keys[1]).unwrap(),
+    )
+    .unwrap();
+    server.enable_tls12();
+    let wire = ClientConnection::new(client.clone(), "fuzz.test")
+        .unwrap()
+        .take_tls();
+    let mut ch = msgs::ClientHello::parse(&wire[9..]).unwrap();
+    for e in ch.extensions.iter_mut() {
+        if e.typ == msgs::ext::SUPPORTED_VERSIONS {
+            e.data = vec![2, 3, 3];
+        }
+    }
+    let body = ch.encode().encode();
+    let mut flight = vec![22, 3, 1, (body.len() >> 8) as u8, body.len() as u8];
+    flight.extend_from_slice(&body);
+    (flight, client, Arc::new(server))
+}
+
+/// A TLS 1.2 server fed mutated ClientHellos.
+#[test]
+fn fuzz_server_connection_tls12() {
+    let c = corpus();
+    let (hello, _, server) = corpus12(&c);
+    run("server12", 3000, |rng| {
+        let input = if rng.below(2) == 0 {
+            mutate_extension(rng, &hello, true)
+        } else {
+            mutate(rng, &hello, &c.server_flight)
+        };
+        let mut s = ServerConnection::new(server.clone());
+        let mut rest = &input[..];
+        while !rest.is_empty() {
+            let n = 1 + rng.below(rest.len());
+            if s.read_tls(&rest[..n]).is_err() {
+                break;
+            }
+            rest = &rest[n..];
+        }
+    });
+}
+
+/// A client that offers 1.2 fed a mutated 1.2 server flight: the
+/// server's answer to a hello that offered only 1.2, with the downgrade
+/// marker in its random cleared. As in the 1.3 target the certificate is
+/// not valid at the real time, so this covers the ServerHello and the
+/// Certificate message.
+#[test]
+fn fuzz_client_connection_tls12() {
+    let c = corpus();
+    let (_, client, server) = corpus12(&c);
+    run("client12", 3000, |rng| {
+        let mut cl = ClientConnection::new(client.clone(), "fuzz.test").unwrap();
+        let wire = cl.take_tls();
+        let mut ch = msgs::ClientHello::parse(&wire[9..]).unwrap();
+        for e in ch.extensions.iter_mut() {
+            if e.typ == msgs::ext::SUPPORTED_VERSIONS {
+                e.data = vec![2, 3, 3];
+            }
+        }
+        let body = ch.encode().encode();
+        let mut hello = vec![22, 3, 1, (body.len() >> 8) as u8, body.len() as u8];
+        hello.extend_from_slice(&body);
+        let mut s = ServerConnection::new(server.clone());
+        s.read_tls(&hello).unwrap();
+        let mut flight = s.take_tls();
+        // Record header, handshake header, version, then the random.
+        flight[5 + 4 + 2 + 24..5 + 4 + 2 + 32].fill(0);
+        let input = if rng.below(2) == 0 {
+            mutate_extension(rng, &flight, false)
+        } else {
+            mutate(rng, &flight, &hello)
         };
         let mut rest = &input[..];
         while !rest.is_empty() {

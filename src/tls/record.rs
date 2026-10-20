@@ -92,6 +92,10 @@ pub struct Protection {
     iv: [u8; 12],
     seq: u64,
     limit: u64,
+    /// TLS 1.2 instead of 1.3: no inner content type, the type and
+    /// length in the additional data, and for GCM an explicit nonce.
+    tls12: bool,
+    explicit_nonce: bool,
 }
 
 impl Protection {
@@ -102,16 +106,114 @@ impl Protection {
             iv: k.iv,
             seq: 0,
             limit: suite.aead.record_limit(),
+            tls12: false,
+            explicit_nonce: false,
         }
     }
 
-    pub fn from_parts(aead: AeadAlg, key: &[u8], iv: [u8; 12]) -> Protection {
+    /// TLS 1.2 record protection from the key block: for GCM (RFC 5288)
+    /// `iv` is the 4-byte salt and each record carries the sequence number
+    /// as its explicit nonce; for ChaCha20 (RFC 7905) `iv` is 12 bytes and
+    /// the nonce is formed as in TLS 1.3.
+    pub fn tls12(aead: AeadAlg, key: &[u8], iv: &[u8]) -> Protection {
+        let mut full = [0u8; 12];
+        full[..iv.len()].copy_from_slice(iv);
         Protection {
             cipher: aead.cipher(key),
-            iv,
+            iv: full,
             seq: 0,
             limit: aead.record_limit(),
+            tls12: true,
+            explicit_nonce: iv.len() == 4,
         }
+    }
+
+    pub fn seal(&mut self, typ: u8, data: &[u8], out: &mut Vec<u8>) -> Result<(), Error> {
+        if self.tls12 {
+            self.seal12(typ, data, out)
+        } else {
+            self.seal13(typ, data, out)
+        }
+    }
+
+    pub fn open(&mut self, rec: RawRecord) -> Result<(u8, Vec<u8>), Error> {
+        if self.tls12 {
+            self.open12(rec)
+        } else {
+            self.open13(rec)
+        }
+    }
+
+    fn nonce12(&self) -> [u8; 12] {
+        if self.explicit_nonce {
+            let mut n = self.iv;
+            n[4..].copy_from_slice(&self.seq.to_be_bytes());
+            n
+        } else {
+            self.nonce()
+        }
+    }
+
+    fn aad12(&self, typ: u8, len: usize) -> [u8; 13] {
+        let mut a = [0u8; 13];
+        a[..8].copy_from_slice(&self.seq.to_be_bytes());
+        a[8] = typ;
+        a[9] = 3;
+        a[10] = 3;
+        a[11..].copy_from_slice(&(len as u16).to_be_bytes());
+        a
+    }
+
+    fn seal12(&mut self, typ: u8, data: &[u8], out: &mut Vec<u8>) -> Result<(), Error> {
+        if self.seq == u64::MAX || self.exhausted() {
+            return Err(Error::internal("record key exhausted"));
+        }
+        let nonce = self.nonce12();
+        let aad = self.aad12(typ, data.len());
+        let mut buf = data.to_vec();
+        self.cipher.seal(&nonce, &aad, &mut buf);
+        let explicit = if self.explicit_nonce { 8 } else { 0 };
+        let len = explicit + buf.len();
+        out.extend_from_slice(&[typ, 3, 3, (len >> 8) as u8, len as u8]);
+        if self.explicit_nonce {
+            out.extend_from_slice(&nonce[4..]);
+        }
+        out.extend_from_slice(&buf);
+        self.seq += 1;
+        Ok(())
+    }
+
+    fn open12(&mut self, rec: RawRecord) -> Result<(u8, Vec<u8>), Error> {
+        if self.seq == u64::MAX {
+            return Err(Error::internal("sequence number exhausted"));
+        }
+        let mut buf = rec.payload;
+        let mut nonce = self.nonce12();
+        if self.explicit_nonce {
+            if buf.len() < 8 {
+                return Err(Error::new(
+                    alert::BAD_RECORD_MAC,
+                    "record failed authentication",
+                ));
+            }
+            nonce[4..].copy_from_slice(&buf[..8]);
+            buf.drain(..8);
+        }
+        let Some(plain_len) = buf.len().checked_sub(16) else {
+            return Err(Error::new(
+                alert::BAD_RECORD_MAC,
+                "record failed authentication",
+            ));
+        };
+        if plain_len > MAX_PLAINTEXT {
+            return Err(Error::new(alert::RECORD_OVERFLOW, "plaintext too long"));
+        }
+        let aad = self.aad12(rec.typ, plain_len);
+        self.cipher
+            .open(&nonce, &aad, &mut buf)
+            .map_err(|_| Error::new(alert::BAD_RECORD_MAC, "record failed authentication"))?;
+        self.seq += 1;
+        Ok((rec.typ, buf))
     }
 
     /// The per-record nonce of RFC 8446 5.3: the sequence number, left
@@ -271,6 +373,56 @@ mod tests {
             e,
             Error::new(alert::BAD_RECORD_MAC, "record failed authentication")
         );
+    }
+
+    /// TLS 1.2 records built by hand as RFC 5246 6.2.3.3, RFC 5288 3 and
+    /// RFC 7905 2 describe them, opened by `Protection`.
+    #[test]
+    fn tls12_records_as_the_rfcs_build_them() {
+        use crate::tls::suites::AeadAlg;
+        let key = [3u8; 16];
+        let aad = |seq: u64, len: usize| {
+            let mut a = seq.to_be_bytes().to_vec();
+            a.extend_from_slice(&[23, 3, 3, (len >> 8) as u8, len as u8]);
+            a
+        };
+        // GCM: the 4-byte salt from the key block, then a nonce of the
+        // sender's choosing that travels in the record.
+        let mut rx = Protection::tls12(AeadAlg::Aes128Gcm, &key, &[1, 2, 3, 4]);
+        let explicit = [0xa5u8; 8];
+        let mut nonce = [1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0];
+        nonce[4..].copy_from_slice(&explicit);
+        let mut buf = b"hello".to_vec();
+        AeadAlg::Aes128Gcm
+            .cipher(&key)
+            .seal(&nonce, &aad(0, 5), &mut buf);
+        let mut payload = explicit.to_vec();
+        payload.extend_from_slice(&buf);
+        let rec = RawRecord {
+            typ: 23,
+            version: 0x0303,
+            payload,
+        };
+        assert_eq!(rx.open(rec).unwrap(), (23, b"hello".to_vec()));
+
+        // ChaCha20-Poly1305: no explicit nonce, the sequence number xored
+        // into the 12-byte IV, here for the second record.
+        let key = [4u8; 32];
+        let iv = [9u8; 12];
+        let mut rx = Protection::tls12(AeadAlg::ChaCha20Poly1305, &key, &iv);
+        rx.seq = 1;
+        let mut nonce = iv;
+        nonce[11] ^= 1;
+        let mut buf = b"world".to_vec();
+        AeadAlg::ChaCha20Poly1305
+            .cipher(&key)
+            .seal(&nonce, &aad(1, 5), &mut buf);
+        let rec = RawRecord {
+            typ: 23,
+            version: 0x0303,
+            payload: buf,
+        };
+        assert_eq!(rx.open(rec).unwrap(), (23, b"world".to_vec()));
     }
 
     #[test]

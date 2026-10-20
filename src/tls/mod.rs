@@ -5,6 +5,7 @@
 
 pub mod auth;
 mod client;
+mod client12;
 pub(crate) mod codec;
 mod config;
 mod conn;
@@ -13,12 +14,15 @@ pub mod error;
 pub mod key_schedule;
 mod kx;
 mod loopback;
+mod loopback12;
 pub mod msgs;
 pub mod record;
 mod rfc8448;
 mod server;
+mod server12;
 mod stream;
 pub mod suites;
+mod tls12;
 pub mod x509;
 
 pub use client::ClientConnection;

@@ -279,7 +279,30 @@ fn pss(k: &rsa::PrivateKey, hash: HashAlg, msg: &[u8]) -> Result<Vec<u8>, Error>
         .map_err(|_| Error::internal("RSA signing failed"))
 }
 
+fn pkcs1(k: &rsa::PrivateKey, hash: HashAlg, msg: &[u8]) -> Result<Vec<u8>, Error> {
+    k.sign_pkcs1(hash, msg)
+        .map_err(|_| Error::internal("RSA signing failed"))
+}
+
 impl Signer for PrivateKey {
+    fn choose_scheme12(&self, offered: &[u16]) -> Option<u16> {
+        match self {
+            // TLS 1.2 still allows PKCS#1 v1.5 for the ServerKeyExchange
+            // and CertificateVerify signatures; PSS comes first if offered.
+            PrivateKey::Rsa(..) => self.choose_scheme(offered).or_else(|| {
+                offered.iter().copied().find(|&s| {
+                    matches!(
+                        s,
+                        scheme::RSA_PKCS1_SHA256
+                            | scheme::RSA_PKCS1_SHA384
+                            | scheme::RSA_PKCS1_SHA512
+                    )
+                })
+            }),
+            _ => self.choose_scheme(offered),
+        }
+    }
+
     fn choose_scheme(&self, offered: &[u16]) -> Option<u16> {
         match self {
             PrivateKey::Ed25519(_) => offered.iter().copied().find(|&s| s == scheme::ED25519),
@@ -313,6 +336,9 @@ impl Signer for PrivateKey {
             (PrivateKey::Rsa(k, _), scheme::RSA_PSS_RSAE_SHA256) => pss(k, HashAlg::Sha256, msg),
             (PrivateKey::Rsa(k, _), scheme::RSA_PSS_RSAE_SHA384) => pss(k, HashAlg::Sha384, msg),
             (PrivateKey::Rsa(k, _), scheme::RSA_PSS_RSAE_SHA512) => pss(k, HashAlg::Sha512, msg),
+            (PrivateKey::Rsa(k, _), scheme::RSA_PKCS1_SHA256) => pkcs1(k, HashAlg::Sha256, msg),
+            (PrivateKey::Rsa(k, _), scheme::RSA_PKCS1_SHA384) => pkcs1(k, HashAlg::Sha384, msg),
+            (PrivateKey::Rsa(k, _), scheme::RSA_PKCS1_SHA512) => pkcs1(k, HashAlg::Sha512, msg),
             _ => Err(Error::internal("scheme does not fit the key")),
         }
     }

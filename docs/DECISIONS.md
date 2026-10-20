@@ -700,3 +700,51 @@ client, so every case ended at the session id check.
 **Cost:** without coverage feedback, paths behind several consistent
 checks are reached rarely; the structure aware mutations reduce that,
 they do not remove it.
+
+## ADR-028: TLS 1.2 as a fallback, off by default
+
+TLS 1.2 exists for peers that do not speak 1.3 yet. `ClientConfig` and
+`ServerConfig` offer it only after `enable_tls12()`; without that call
+nothing changes from ADR-022. When enabled, the client offers both
+versions in one ClientHello and the server answers 1.2 only to a client
+that does not offer 1.3.
+
+**What is built, and nothing more:** ECDHE over X25519, P-256 or P-384,
+with AES-128-GCM, AES-256-GCM or ChaCha20-Poly1305, authenticated by
+ECDSA, Ed25519 (RFC 8422) or RSA. The extended master secret (RFC 7627)
+is required from the peer on both sides: without it, a man in the middle
+can make two connections share one master secret (the triple handshake
+attack), and every implementation that matters has sent it for a
+decade. Signatures may use RSA PKCS#1 v1.5, which TLS 1.2 allows and
+1.3 does not; SHA-1 and the RFC 5246 default of SHA-1 when
+signature_algorithms is missing are refused.
+
+**Left out on purpose:** renegotiation (any handshake message after the
+handshake ends the connection), session resumption by id or ticket (a
+full handshake costs one more round trip and keeps no state), static
+RSA and finite field Diffie-Hellman key exchange, CBC, compression, and
+False Start. Exported keying material (RFC 5705) is always derived with
+the context, even an empty one.
+
+**Downgrades:** a server that also speaks 1.3 and answers 1.2 puts
+`DOWNGRD\x01` at the end of its random (RFC 8446 4.1.3); the client,
+which always offers 1.3, refuses a 1.2 answer carrying either marker.
+The random is covered by the ServerKeyExchange signature, so an attacker
+cannot remove it.
+
+**Code:** the 1.2 handshake has its own states (`client12.rs`,
+`server12.rs`, shared messages and key derivation in `tls12.rs`); the
+record layer and the connection core switch on the negotiated version.
+In 1.2 change_cipher_spec is not ignored as in 1.3 but switches the read
+keys, and only when the handshake has keys ready for it.
+
+**Checked by:** handshakes against OpenSSL (`-tls1_2`) and Go
+(`MaxVersion` 1.2) in both directions, with and without client
+certificates, with Ed25519, P-256 and RSA keys, every one of the six
+suites forced once on the OpenSSL server, and the exported keying
+material compared with Go's; loopback tests of every suite and group,
+of refused hellos on both sides, of the downgrade marker and of
+change_cipher_spec out of place; records built by hand from the RFCs;
+fuzzing of the 1.2 hellos; and fourteen mutants, two of which (the
+master secret label and the key block seed) only interop can find,
+since both sides of a loopback would agree on the same mistake.

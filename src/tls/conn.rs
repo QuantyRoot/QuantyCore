@@ -10,10 +10,11 @@
 use super::crypto::ct::Secret;
 use super::crypto::sha2::{AnyHash, HashAlg};
 use super::error::{alert, Error};
+use super::key_schedule::prf12;
 use super::key_schedule::{export, next_traffic_secret};
 use super::msgs::{content, hs, Handshake};
 use super::record::{Deframer, HandshakeJoiner, Protection, MAX_CIPHERTEXT_13, MAX_PLAINTEXT};
-use super::suites::Suite;
+use super::suites::{Suite, Suite12};
 
 /// One state of a handshake. Each takes the next message and returns the
 /// state after it, so a message can only be handled by a state that
@@ -60,6 +61,12 @@ impl Transcript {
             self.buf.clear();
             self.hash = Some(h);
         }
+    }
+
+    /// The messages buffered before a hash was chosen. TLS 1.2 keeps the
+    /// whole transcript as bytes from there on.
+    pub(crate) fn into_buffer(self) -> Option<Vec<u8>> {
+        self.hash.is_none().then_some(self.buf)
     }
 
     pub(crate) fn current(&self) -> Vec<u8> {
@@ -127,6 +134,12 @@ pub(crate) struct Core {
     pub(crate) peer_chain: Option<Vec<Vec<u8>>>,
     pub(crate) server_name: Option<String>,
     pub(crate) resumed: bool,
+    /// TLS 1.2 was negotiated: change_cipher_spec switches the read keys
+    /// to `pending_read` instead of being ignored.
+    pub(crate) tls12: Option<Suite12>,
+    pending_read: Option<Protection>,
+    /// The master secret and both randoms, for the RFC 5705 exporter.
+    pub(crate) exporter12: Option<(Secret, Vec<u8>)>,
 }
 
 /// Records that carry nothing (empty application data, ignored
@@ -161,7 +174,41 @@ impl Core {
             peer_chain: None,
             server_name: None,
             resumed: false,
+            tls12: None,
+            pending_read: None,
+            exporter12: None,
         }
+    }
+
+    /// TLS 1.2: the read protection that the peer's change_cipher_spec
+    /// will switch to.
+    pub(crate) fn expect_ccs(&mut self, p: Protection) {
+        self.pending_read = Some(p);
+    }
+
+    /// TLS 1.2: sends change_cipher_spec and switches the write keys.
+    pub(crate) fn change_write_keys(&mut self, p: Protection) -> Result<(), Error> {
+        self.send_ccs()?;
+        self.write = Some(p);
+        Ok(())
+    }
+
+    /// TLS 1.2: the handshake is finished in this direction.
+    pub(crate) fn open_write(&mut self) -> Result<(), Error> {
+        self.flush_hs()?;
+        self.write_is_app = true;
+        let pending = std::mem::take(&mut self.plain_out);
+        self.write_app(&pending)
+    }
+
+    /// TLS 1.2: true once the peer's change_cipher_spec has switched the
+    /// read keys, which must happen before its Finished.
+    pub(crate) fn read_protected(&self) -> bool {
+        self.read.is_some()
+    }
+
+    pub(crate) fn open_read(&mut self) {
+        self.read_is_app = true;
     }
 
     pub(crate) fn send_hs(&mut self, msg: &Handshake) -> Vec<u8> {
@@ -176,7 +223,7 @@ impl Core {
         let data = std::mem::take(&mut self.pending_hs);
         for chunk in data.chunks(MAX_PLAINTEXT) {
             match &mut self.write {
-                Some(p) => p.seal13(content::HANDSHAKE, chunk, &mut self.out)?,
+                Some(p) => p.seal(content::HANDSHAKE, chunk, &mut self.out)?,
                 None => {
                     let v = self.first_record_version.take().unwrap_or(0x0303);
                     self.plain_record(content::HANDSHAKE, v, chunk);
@@ -254,13 +301,17 @@ impl Core {
         }
         for chunk in data.chunks(MAX_PLAINTEXT) {
             if self.write.as_ref().is_some_and(Protection::exhausted) {
+                // TLS 1.2 has no KeyUpdate; the connection has to end.
+                if self.tls12.is_some() {
+                    return Err(Error::internal("record limit of the key reached"));
+                }
                 self.send_key_update(false)?;
             }
             let w = self
                 .write
                 .as_mut()
                 .ok_or(Error::internal("no write keys"))?;
-            w.seal13(content::APPLICATION_DATA, chunk, &mut self.out)?;
+            w.seal(content::APPLICATION_DATA, chunk, &mut self.out)?;
         }
         Ok(())
     }
@@ -323,7 +374,7 @@ impl Core {
         let _ = self.flush_hs();
         match &mut self.write {
             Some(p) => {
-                let _ = p.seal13(content::ALERT, &[level, desc], &mut self.out);
+                let _ = p.seal(content::ALERT, &[level, desc], &mut self.out);
             }
             None => self.plain_record(content::ALERT, 0x0303, &[level, desc]),
         }
@@ -343,6 +394,19 @@ impl Core {
             if self.peer_closed {
                 return Err(Error::unexpected("data after close_notify"));
             }
+            if rec.typ == content::CHANGE_CIPHER_SPEC && self.tls12.is_some() {
+                // In TLS 1.2 it switches the read keys, and only where the
+                // handshake expects it.
+                if rec.payload != [1] || self.joiner.is_mid_message() {
+                    return Err(Error::unexpected("change_cipher_spec"));
+                }
+                let p = self
+                    .pending_read
+                    .take()
+                    .ok_or(Error::unexpected("change_cipher_spec"))?;
+                self.read = Some(p);
+                continue;
+            }
             if rec.typ == content::CHANGE_CIPHER_SPEC {
                 // Only during the handshake, only the one-byte dummy, and
                 // never protected (RFC 8446 5).
@@ -353,7 +417,7 @@ impl Core {
                 continue;
             }
             let (typ, data) = match &mut self.read {
-                Some(p) => p.open13(rec)?,
+                Some(p) => p.open(rec)?,
                 None => {
                     if rec.typ == content::APPLICATION_DATA {
                         return Err(Error::unexpected("application data before keys"));
@@ -443,7 +507,7 @@ impl Connection {
         let mut state = self.state.take();
         let r = self.core.process(&mut state);
         self.state = state;
-        if self.state.as_ref().is_some_and(|s| s.is_connected()) {
+        if self.state.as_ref().is_some_and(|s| s.is_connected()) && self.core.tls12.is_none() {
             self.core.deframer.max_ciphertext = MAX_CIPHERTEXT_13;
         }
         r.map_err(|e| self.fail(e))
@@ -516,7 +580,19 @@ impl Connection {
     }
 
     pub fn cipher_suite(&self) -> Option<u16> {
-        self.core.suite.map(|s| s.id)
+        self.core
+            .suite
+            .map(|s| s.id)
+            .or(self.core.tls12.map(|s| s.id))
+    }
+
+    /// 0x0304 for TLS 1.3, 0x0303 for TLS 1.2, once negotiated.
+    pub fn protocol_version(&self) -> Option<u16> {
+        if self.core.tls12.is_some() {
+            Some(0x0303)
+        } else {
+            self.core.suite.map(|_| 0x0304)
+        }
     }
 
     /// True if this connection was resumed from a session ticket.
@@ -531,6 +607,18 @@ impl Connection {
         context: &[u8],
         len: usize,
     ) -> Result<Vec<u8>, Error> {
+        if let (Some(suite), Some((master, randoms))) = (self.core.tls12, &self.core.exporter12) {
+            // RFC 5705 4, with a context: the randoms, its length, itself.
+            if context.len() > u16::MAX as usize {
+                return Err(Error::internal("exporter context too long"));
+            }
+            let mut seed = randoms.clone();
+            seed.extend_from_slice(&(context.len() as u16).to_be_bytes());
+            seed.extend_from_slice(context);
+            return Ok(prf12(suite.hash, master.expose(), label, &seed, len)
+                .expose()
+                .to_vec());
+        }
         let (Some(suite), Some(secret)) = (self.core.suite, &self.core.exporter) else {
             return Err(Error::Closed);
         };
@@ -543,6 +631,9 @@ impl Connection {
     /// own. Keys are also replaced on their own before AES-GCM reaches its
     /// record limit.
     pub fn update_keys(&mut self) -> Result<(), Error> {
+        if self.core.tls12.is_some() {
+            return Err(Error::unexpected("TLS 1.2 has no KeyUpdate"));
+        }
         if self.is_handshaking() {
             return Err(Error::unexpected("key update during the handshake"));
         }

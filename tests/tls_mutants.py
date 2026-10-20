@@ -23,6 +23,7 @@ VECTORS = ["--release", "--test", "tls_vectors"]
 TIMING = ["--release", "--test", "tls_timing"]
 LIMBO = ["--release", "--test", "tls_limbo"]
 FUZZ = ["--release", "--test", "tls_fuzz"]
+INTEROP = ["--release", "--test", "tls_interop"]
 
 # name, file, text to find (exactly once), replacement, cargo test args,
 # test filter, environment the test needs
@@ -771,6 +772,104 @@ MUTANTS = [
         """                let p: [u8; 32] = peer[..32].try_into().unwrap();""",
         FUZZ, "fuzz_client_connection", [],
     ),
+    (
+        "tls12: client does not look for the downgrade marker",
+        "src/tls/client12.rs",
+        "    if sh.random[24..] == DOWNGRADE_TLS12 || sh.random[24..] == DOWNGRADE_TLS11 {",
+        "    if false {",
+        UNIT, "a_downgrade_from_tls13_is_detected", [],
+    ),
+    (
+        "tls12: server does not set the downgrade marker",
+        "src/tls/server12.rs",
+        "        random[24..].copy_from_slice(&DOWNGRADE_TLS12);",
+        "",
+        UNIT, "a_downgrade_from_tls13_is_detected", [],
+    ),
+    (
+        "tls12: client accepts a server without extended master secret",
+        "src/tls/client12.rs",
+        "    if sh.ext(ext::EXTENDED_MASTER_SECRET).is_none() {",
+        "    if false {",
+        UNIT, "client_refuses_a_broken_server_hello", [],
+    ),
+    (
+        "tls12: server accepts a client without extended master secret",
+        "src/tls/server12.rs",
+        "        Some([]) => {}",
+        "        Some([]) | None => {}",
+        UNIT, "server_refuses_a_broken_client_hello", [],
+    ),
+    (
+        "tls12: server accepts renegotiation_info of a renegotiation",
+        "src/tls/server12.rs",
+        "is_some_and(|r| r != [0])",
+        "is_some_and(|r| r == [0xff])",
+        UNIT, "server_refuses_a_broken_client_hello", [],
+    ),
+    (
+        "tls12: ec_point_formats not checked",
+        "src/tls/tls12.rs",
+        "    if !f.contains(&0) {",
+        "    if f.is_empty() {",
+        UNIT, "client_refuses_a_broken_server_hello", [],
+    ),
+    (
+        "tls12: certificate key not matched to the suite",
+        "src/tls/client12.rs",
+        "        if !key.fits(hs.suite.auth) {",
+        "        if false {",
+        UNIT, "client_refuses_a_broken_server_hello", [],
+    ),
+    (
+        "tls12: ServerKeyExchange signature not checked",
+        "src/tls/client12.rs",
+        "        self.key.verify12(skx.scheme, &signed, &skx.signature)?;",
+        "        let _ = self.key.verify12(skx.scheme, &signed, &skx.signature);",
+        UNIT, "a_wrong_server_key_fails_the_key_exchange_signature", [],
+    ),
+    (
+        "tls12: client CertificateVerify not checked",
+        "src/tls/server12.rs",
+        "            .verify12(cv.scheme, &next.hs.transcript, &cv.signature)?;",
+        "            .verify12(cv.scheme, &next.hs.transcript, &cv.signature)\n            .ok();",
+        UNIT, "mutual_authentication", [],
+    ),
+    (
+        "tls12: change_cipher_spec content not checked",
+        "src/tls/conn.rs",
+        "                if rec.payload != [1] || self.joiner.is_mid_message() {",
+        "                if self.joiner.is_mid_message() {",
+        UNIT, "change_cipher_spec_only_where_the_handshake_expects_it", [],
+    ),
+    (
+        "tls12: renegotiation accepted",
+        "src/tls/tls12.rs",
+        '        Err(Error::unexpected("renegotiation is not supported"))',
+        "        Ok(self)",
+        UNIT, "no_key_update_and_no_renegotiation", [],
+    ),
+    (
+        "tls12: GCM explicit nonce ignored",
+        "src/tls/record.rs",
+        "            nonce[4..].copy_from_slice(&buf[..8]);",
+        "",
+        UNIT, "tls12_records_as_the_rfcs_build_them", [],
+    ),
+    (
+        "tls12: master secret without the session hash",
+        "src/tls/tls12.rs",
+        '        b"extended master secret",',
+        '        b"master secret",',
+        INTEROP, "openssl_tls12", [],
+    ),
+    (
+        "tls12: key block seeded with the randoms swapped",
+        "src/tls/tls12.rs",
+        "    let mut seed = server_random.to_vec();\n    seed.extend_from_slice(client_random);",
+        "    let mut seed = client_random.to_vec();\n    seed.extend_from_slice(server_random);",
+        INTEROP, "openssl_tls12", [],
+    ),
 ]
 
 
@@ -805,7 +904,7 @@ def main():
         open(full, "w").write(original.replace(find, repl))
         try:
             start = time.time()
-            extra = ["--", "--ignored"] if args is TIMING else []
+            extra = ["--", "--ignored"] if args is TIMING or args is INTEROP else []
             try:
                 r = run(["cargo", "test", *args, test, *extra], env)
             except subprocess.TimeoutExpired:

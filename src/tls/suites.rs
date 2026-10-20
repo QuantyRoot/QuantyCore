@@ -100,3 +100,76 @@ impl RecordCipher {
         }
     }
 }
+
+/// What kind of certificate key a TLS 1.2 suite needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Auth {
+    /// ECDSA or Ed25519 (RFC 8422 allows EdDSA with the ECDSA suites).
+    Ecdsa,
+    Rsa,
+}
+
+/// A TLS 1.2 cipher suite: ECDHE key exchange with an AEAD, nothing else
+/// (ADR-020).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Suite12 {
+    pub id: u16,
+    pub hash: HashAlg,
+    pub aead: AeadAlg,
+    pub auth: Auth,
+}
+
+pub const ALL_TLS12: [Suite12; 6] = [
+    Suite12 {
+        id: 0xcca9,
+        hash: HashAlg::Sha256,
+        aead: AeadAlg::ChaCha20Poly1305,
+        auth: Auth::Ecdsa,
+    },
+    Suite12 {
+        id: 0xc02b,
+        hash: HashAlg::Sha256,
+        aead: AeadAlg::Aes128Gcm,
+        auth: Auth::Ecdsa,
+    },
+    Suite12 {
+        id: 0xc02c,
+        hash: HashAlg::Sha384,
+        aead: AeadAlg::Aes256Gcm,
+        auth: Auth::Ecdsa,
+    },
+    Suite12 {
+        id: 0xcca8,
+        hash: HashAlg::Sha256,
+        aead: AeadAlg::ChaCha20Poly1305,
+        auth: Auth::Rsa,
+    },
+    Suite12 {
+        id: 0xc02f,
+        hash: HashAlg::Sha256,
+        aead: AeadAlg::Aes128Gcm,
+        auth: Auth::Rsa,
+    },
+    Suite12 {
+        id: 0xc030,
+        hash: HashAlg::Sha384,
+        aead: AeadAlg::Aes256Gcm,
+        auth: Auth::Rsa,
+    },
+];
+
+pub fn tls12_suite(id: u16) -> Option<Suite12> {
+    ALL_TLS12.into_iter().find(|s| s.id == id)
+}
+
+impl AeadAlg {
+    /// The bytes of IV taken from the TLS 1.2 key block: a 4-byte salt
+    /// for GCM (RFC 5288), the whole 12-byte nonce mask for ChaCha20
+    /// (RFC 7905).
+    pub fn tls12_iv_len(self) -> usize {
+        match self {
+            AeadAlg::Aes128Gcm | AeadAlg::Aes256Gcm => 4,
+            AeadAlg::ChaCha20Poly1305 => 12,
+        }
+    }
+}

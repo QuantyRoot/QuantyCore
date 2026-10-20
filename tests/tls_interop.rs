@@ -156,10 +156,29 @@ fn connect_retry(port: u16) -> TcpStream {
 /// Our client against `openssl s_server -www`, which answers an HTTP
 /// request with a page describing the connection.
 fn client_against_s_server(mtls: bool) {
-    client_against_s_server_with(mtls, Kind::Ed25519);
+    client_against_s_server_with(mtls, Kind::Ed25519, false);
 }
 
-fn client_against_s_server_with(mtls: bool, kind: Kind) {
+fn version_flag(tls12: bool) -> &'static str {
+    if tls12 {
+        "-tls1_2"
+    } else {
+        "-tls1_3"
+    }
+}
+
+fn client_against_s_server_with(mtls: bool, kind: Kind, tls12: bool) {
+    client_against_s_server_cipher(mtls, kind, tls12, None);
+}
+
+/// With `cipher`, s_server is limited to that one TLS 1.2 suite, given
+/// by its OpenSSL name and its number.
+fn client_against_s_server_cipher(
+    mtls: bool,
+    kind: Kind,
+    tls12: bool,
+    cipher: Option<(&str, u16)>,
+) {
     let p = pki_of(if mtls { "c-mtls" } else { "c" }, kind);
     let port = free_port();
     let mut cmd = Command::new("openssl");
@@ -167,7 +186,7 @@ fn client_against_s_server_with(mtls: bool, kind: Kind) {
         "s_server",
         "-quiet",
         "-www",
-        "-tls1_3",
+        version_flag(tls12),
         "-accept",
         &port.to_string(),
     ])
@@ -178,6 +197,9 @@ fn client_against_s_server_with(mtls: bool, kind: Kind) {
         &p.path("server.key"),
     ])
     .args(["-alpn", "h2"]);
+    if let Some((name, _)) = cipher {
+        cmd.args(["-cipher", name]);
+    }
     if mtls {
         cmd.args([
             "-Verify",
@@ -197,6 +219,9 @@ fn client_against_s_server_with(mtls: bool, kind: Kind) {
 
     let mut config = ClientConfig::new(p.roots());
     config.set_alpn(&[b"h2"]);
+    if tls12 {
+        config.enable_tls12();
+    }
     if mtls {
         config.set_client_certificate(
             p.client_chain.clone(),
@@ -211,16 +236,25 @@ fn client_against_s_server_with(mtls: bool, kind: Kind) {
     let mut page = String::new();
     let _ = s.read_to_string(&mut page);
     assert!(page.starts_with("HTTP/1.0 200 ok"), "{page}");
-    assert!(page.contains("TLSv1.3"), "{page}");
+    let (name, v) = if tls12 {
+        ("TLSv1.2", 0x0303)
+    } else {
+        ("TLSv1.3", 0x0304)
+    };
+    assert!(page.contains(name), "{page}");
+    assert_eq!(s.connection().protocol_version(), Some(v));
+    if let Some((_, id)) = cipher {
+        assert_eq!(s.connection().cipher_suite(), Some(id));
+    }
 }
 
 /// `openssl s_client` against our server, which echoes one line back
 /// upper case and closes.
 fn s_client_against_server(mtls: bool) {
-    s_client_against_server_with(mtls, Kind::Ed25519);
+    s_client_against_server_with(mtls, Kind::Ed25519, false);
 }
 
-fn s_client_against_server_with(mtls: bool, kind: Kind) {
+fn s_client_against_server_with(mtls: bool, kind: Kind, tls12: bool) {
     let p = pki_of(if mtls { "s-mtls" } else { "s" }, kind);
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -232,6 +266,9 @@ fn s_client_against_server_with(mtls: bool, kind: Kind) {
     if mtls {
         config.require_client_certificates(p.roots());
     }
+    if tls12 {
+        config.enable_tls12();
+    }
     let config = Arc::new(config);
     let server = std::thread::spawn(move || {
         let (tcp, _) = listener.accept().unwrap();
@@ -239,17 +276,18 @@ fn s_client_against_server_with(mtls: bool, kind: Kind) {
         let mut s = Stream::new(ServerConnection::new(config), tcp);
         s.handshake().unwrap();
         let peer = s.connection().peer_certificates().map(|c| c.len());
+        let version = s.connection().protocol_version();
         let mut line = String::new();
         BufReader::new(&mut s).read_line(&mut line).unwrap();
         s.write_all(line.to_uppercase().as_bytes()).unwrap();
         s.close().unwrap();
-        peer
+        (peer, version)
     });
     let mut cmd = Command::new("openssl");
     cmd.args([
         "s_client",
         "-quiet",
-        "-tls1_3",
+        version_flag(tls12),
         "-connect",
         &format!("127.0.0.1:{port}"),
     ])
@@ -284,8 +322,9 @@ fn s_client_against_server_with(mtls: bool, kind: Kind) {
     );
     // s_client sends the root along with its certificate; the chain is
     // valid either way.
-    let peer = server.join().unwrap();
+    let (peer, version) = server.join().unwrap();
     assert_eq!(peer.is_some_and(|n| n >= 1), mtls);
+    assert_eq!(version, Some(if tls12 { 0x0303 } else { 0x0304 }));
 }
 
 #[test]
@@ -318,18 +357,30 @@ import (
 	"bufio"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"strings"
 )
 
+func export(c *tls.Conn) string {
+	st := c.ConnectionState()
+	k, err := st.ExportKeyingMaterial("EXPORTER-test", []byte("ctx"), 32)
+	if err != nil { panic(err) }
+	return hex.EncodeToString(k)
+}
+
 func main() {
 	mode, addr, dir, mtls := os.Args[1], os.Args[2], os.Args[3], os.Args[4] == "1"
+	var version uint16 = tls.VersionTLS13
+	if os.Args[5] == "12" {
+		version = tls.VersionTLS12
+	}
 	pool := x509.NewCertPool()
 	root, _ := os.ReadFile(dir + "/root.pem")
 	pool.AppendCertsFromPEM(root)
 	if mode == "client" {
-		cfg := &tls.Config{RootCAs: pool, ServerName: "localhost", MinVersion: tls.VersionTLS13}
+		cfg := &tls.Config{RootCAs: pool, ServerName: "localhost", MinVersion: version, MaxVersion: version}
 		if mtls {
 			c, err := tls.LoadX509KeyPair(dir+"/client.pem", dir+"/client.key")
 			if err != nil { panic(err) }
@@ -341,11 +392,12 @@ func main() {
 		line, err := bufio.NewReader(conn).ReadString('\n')
 		if err != nil { panic(err) }
 		fmt.Print(line)
+		fmt.Println(export(conn))
 		return
 	}
 	c, err := tls.LoadX509KeyPair(dir+"/server.pem", dir+"/server.key")
 	if err != nil { panic(err) }
-	cfg := &tls.Config{Certificates: []tls.Certificate{c}, MinVersion: tls.VersionTLS13, NextProtos: []string{"h2"}}
+	cfg := &tls.Config{Certificates: []tls.Certificate{c}, MinVersion: version, MaxVersion: version, NextProtos: []string{"h2"}}
 	if mtls {
 		cfg.ClientAuth = tls.RequireAndVerifyClientCert
 		cfg.ClientCAs = pool
@@ -358,6 +410,7 @@ func main() {
 	line, err := bufio.NewReader(conn).ReadString('\n')
 	if err != nil { panic(err) }
 	fmt.Fprint(conn, strings.ToUpper(line))
+	fmt.Fprintln(conn, export(conn.(*tls.Conn)))
 	conn.Close()
 }
 "#;
@@ -380,16 +433,25 @@ fn go_program(p: &Pki) -> Option<PathBuf> {
     Some(bin)
 }
 
-fn go_both_ways(mtls: bool) {
-    go_both_ways_with(mtls, Kind::Ed25519);
+fn exported(c: &quantycore::tls::Connection) -> String {
+    c.export_keying_material(b"EXPORTER-test", b"ctx", 32)
+        .unwrap()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
-fn go_both_ways_with(mtls: bool, kind: Kind) {
+fn go_both_ways(mtls: bool) {
+    go_both_ways_with(mtls, Kind::Ed25519, false);
+}
+
+fn go_both_ways_with(mtls: bool, kind: Kind, tls12: bool) {
     let p = pki_of(if mtls { "go-mtls" } else { "go" }, kind);
     let Some(bin) = go_program(&p) else {
         return;
     };
     let m = if mtls { "1" } else { "0" };
+    let v = if tls12 { "12" } else { "13" };
 
     // Go server, our client.
     let port = free_port();
@@ -399,6 +461,7 @@ fn go_both_ways_with(mtls: bool, kind: Kind) {
             &format!("127.0.0.1:{port}"),
             p.dir.to_str().unwrap(),
             m,
+            v,
         ])
         .stdout(Stdio::piped())
         .spawn()
@@ -410,6 +473,9 @@ fn go_both_ways_with(mtls: bool, kind: Kind) {
     let _g = Guard(child);
     let mut config = ClientConfig::new(p.roots());
     config.set_alpn(&[b"h2"]);
+    if tls12 {
+        config.enable_tls12();
+    }
     if mtls {
         config.set_client_certificate(
             p.client_chain.clone(),
@@ -422,9 +488,19 @@ fn go_both_ways_with(mtls: bool, kind: Kind) {
     );
     s.write_all(b"hello from quanty\n").unwrap();
     let mut back = String::new();
-    BufReader::new(&mut s).read_line(&mut back).unwrap();
+    let mut r = BufReader::new(&mut s);
+    r.read_line(&mut back).unwrap();
     assert_eq!(back, "HELLO FROM QUANTY\n");
+    // Both sides export the same keying material (RFC 5705, RFC 8446
+    // 7.5).
+    let mut theirs = String::new();
+    r.read_line(&mut theirs).unwrap();
+    assert_eq!(theirs.trim(), exported(s.connection()));
     assert_eq!(s.connection().alpn_protocol(), Some(&b"h2"[..]));
+    assert_eq!(
+        s.connection().protocol_version(),
+        Some(if tls12 { 0x0303 } else { 0x0304 })
+    );
 
     // Our server, Go client.
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -437,6 +513,9 @@ fn go_both_ways_with(mtls: bool, kind: Kind) {
     if mtls {
         config.require_client_certificates(p.roots());
     }
+    if tls12 {
+        config.enable_tls12();
+    }
     let config = Arc::new(config);
     let server = std::thread::spawn(move || {
         let (tcp, _) = listener.accept().unwrap();
@@ -445,6 +524,7 @@ fn go_both_ways_with(mtls: bool, kind: Kind) {
         BufReader::new(&mut s).read_line(&mut line).unwrap();
         s.write_all(line.to_uppercase().as_bytes()).unwrap();
         s.close().unwrap();
+        exported(s.connection())
     });
     let out = Command::new(&bin)
         .args([
@@ -452,16 +532,17 @@ fn go_both_ways_with(mtls: bool, kind: Kind) {
             &format!("127.0.0.1:{port}"),
             p.dir.to_str().unwrap(),
             m,
+            v,
         ])
         .output()
         .unwrap();
+    let ours = server.join().unwrap();
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
-        "HELLO FROM GO\n",
+        format!("HELLO FROM GO\n{ours}\n"),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    server.join().unwrap();
 }
 
 #[test]
@@ -480,8 +561,40 @@ fn go_crypto_tls_mtls() {
 #[ignore]
 fn openssl_with_p256_and_rsa() {
     for kind in [Kind::P256, Kind::Rsa] {
-        client_against_s_server_with(true, kind);
-        s_client_against_server_with(true, kind);
+        client_against_s_server_with(true, kind, false);
+        s_client_against_server_with(true, kind, false);
+    }
+}
+
+#[test]
+#[ignore]
+fn openssl_tls12() {
+    for kind in [Kind::Ed25519, Kind::P256, Kind::Rsa] {
+        for mtls in [false, true] {
+            client_against_s_server_with(mtls, kind, true);
+            s_client_against_server_with(mtls, kind, true);
+        }
+    }
+    let suites = [
+        (Kind::P256, "ECDHE-ECDSA-CHACHA20-POLY1305", 0xcca9),
+        (Kind::P256, "ECDHE-ECDSA-AES128-GCM-SHA256", 0xc02b),
+        (Kind::P256, "ECDHE-ECDSA-AES256-GCM-SHA384", 0xc02c),
+        (Kind::Rsa, "ECDHE-RSA-CHACHA20-POLY1305", 0xcca8),
+        (Kind::Rsa, "ECDHE-RSA-AES128-GCM-SHA256", 0xc02f),
+        (Kind::Rsa, "ECDHE-RSA-AES256-GCM-SHA384", 0xc030),
+    ];
+    for (kind, name, id) in suites {
+        client_against_s_server_cipher(false, kind, true, Some((name, id)));
+    }
+}
+
+#[test]
+#[ignore]
+fn go_tls12() {
+    for kind in [Kind::P256, Kind::Rsa] {
+        for mtls in [false, true] {
+            go_both_ways_with(mtls, kind, true);
+        }
     }
 }
 
@@ -489,6 +602,6 @@ fn openssl_with_p256_and_rsa() {
 #[ignore]
 fn go_with_p256_and_rsa() {
     for kind in [Kind::P256, Kind::Rsa] {
-        go_both_ways_with(true, kind);
+        go_both_ways_with(true, kind, false);
     }
 }

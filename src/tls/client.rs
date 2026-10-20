@@ -1,6 +1,7 @@
 //! The TLS 1.3 client handshake (RFC 8446 section 4 and appendix A.1).
 
-use super::auth::{signed_content, PublicKey};
+use super::auth::{signed_content, with_pkcs1, PublicKey};
+use super::client12;
 use super::config::{ClientConfig, StoredTicket, TicketCache};
 use super::conn::{Connected, Connection, Core, State, Transcript};
 use super::crypto::ct::Secret;
@@ -9,7 +10,7 @@ use super::error::{alert, Error};
 use super::key_schedule::{finished_verify_data, resumption_psk, verify_finished, KeySchedule};
 use super::kx::KxSecret;
 use super::msgs::*;
-use super::suites::{tls13_suite, Suite};
+use super::suites::{tls13_suite, Suite, ALL_TLS12};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -33,13 +34,13 @@ impl std::ops::DerefMut for ClientConnection {
 
 /// What the client sent in its ClientHello and keeps to check the
 /// server's answers against.
-struct Offer {
-    config: Arc<ClientConfig>,
-    name: Option<String>,
-    session_id: Vec<u8>,
-    suites: Vec<u16>,
-    extensions: Vec<u16>,
-    kx: KxSecret,
+pub(super) struct Offer {
+    pub(super) config: Arc<ClientConfig>,
+    pub(super) name: Option<String>,
+    pub(super) session_id: Vec<u8>,
+    pub(super) suites: Vec<u16>,
+    pub(super) extensions: Vec<u16>,
+    pub(super) kx: KxSecret,
     ticket: Option<StoredTicket>,
 }
 
@@ -113,7 +114,11 @@ fn build_hello(
         add(ext::SERVER_NAME, write_server_name(name));
     }
     let mut v = Vec::new();
-    put_u16_list_u8(&mut v, &[version::TLS13]);
+    if config.tls12 {
+        put_u16_list_u8(&mut v, &[version::TLS13, version::TLS12]);
+    } else {
+        put_u16_list_u8(&mut v, &[version::TLS13]);
+    }
     add(ext::SUPPORTED_VERSIONS, v);
     let mut g = Vec::new();
     put_u16_list(&mut g, 2, &config.groups);
@@ -126,8 +131,13 @@ fn build_hello(
         }]),
     );
     let mut s = Vec::new();
-    put_u16_list(&mut s, 2, &config.verifier.schemes());
+    put_u16_list(&mut s, 2, &offered_schemes(config));
     add(ext::SIGNATURE_ALGORITHMS, s);
+    if config.tls12 {
+        add(ext::EC_POINT_FORMATS, vec![1, 0]);
+        add(ext::EXTENDED_MASTER_SECRET, Vec::new());
+        add(ext::RENEGOTIATION_INFO, vec![0]);
+    }
     if !config.alpn.is_empty() {
         add(ext::ALPN, write_alpn(&config.alpn));
     }
@@ -150,13 +160,27 @@ fn build_hello(
         };
         add(ext::PRE_SHARED_KEY, write_offered_psks(&psks));
     }
+    let mut cipher_suites: Vec<u16> = config.suites.iter().map(|s| s.id).collect();
+    if config.tls12 {
+        cipher_suites.extend(ALL_TLS12.iter().map(|s| s.id));
+    }
     ClientHello {
         legacy_version: version::TLS12,
         random,
         session_id,
-        cipher_suites: config.suites.iter().map(|s| s.id).collect(),
+        cipher_suites,
         compression: vec![0],
         extensions: exts,
+    }
+}
+
+/// The signature_algorithms list: what the verifier accepts, and for
+/// TLS 1.2 also RSA PKCS#1 v1.5.
+pub(super) fn offered_schemes(config: &ClientConfig) -> Vec<u16> {
+    if config.tls12 {
+        with_pkcs1(config.verifier.schemes())
+    } else {
+        config.verifier.schemes()
     }
 }
 
@@ -203,7 +227,14 @@ impl State for ExpectServerHello {
         let sh = ServerHello::parse(&msg.body)?;
         let Some(v) = sh.ext(ext::SUPPORTED_VERSIONS) else {
             // A server that ignores supported_versions speaks TLS 1.2 or
-            // older, which this client does not offer.
+            // older.
+            if s.offer.config.tls12 && !s.retried && sh.legacy_version == version::TLS12 {
+                let ch = s
+                    .transcript
+                    .into_buffer()
+                    .ok_or(Error::internal("transcript"))?;
+                return client12::server_hello(core, s.offer, s.hello.random, ch, sh, raw);
+            }
             return Err(Error::new(
                 alert::PROTOCOL_VERSION,
                 "server does not speak TLS 1.3",

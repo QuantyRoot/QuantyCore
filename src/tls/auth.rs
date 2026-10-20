@@ -184,6 +184,82 @@ impl PublicKey {
     }
 }
 
+impl PublicKey {
+    /// A TLS 1.2 handshake signature. Unlike TLS 1.3, an ECDSA scheme
+    /// names only the hash and works with either curve (RFC 8422 5.1.3),
+    /// and RSA PKCS#1 v1.5 is allowed (RFC 5246 7.4.1.4.1).
+    pub fn verify12(&self, sig_scheme: u16, msg: &[u8], sig: &[u8]) -> Result<(), Error> {
+        let ok = match (self, sig_scheme) {
+            (PublicKey::Ec(c, q), scheme::ECDSA_SECP256R1_SHA256) => {
+                ecdsa_verify(*c, q, HashAlg::Sha256, msg, sig)
+            }
+            (PublicKey::Ec(c, q), scheme::ECDSA_SECP384R1_SHA384) => {
+                ecdsa_verify(*c, q, HashAlg::Sha384, msg, sig)
+            }
+            (PublicKey::Rsa(k), scheme::RSA_PKCS1_SHA256) => {
+                k.verify_pkcs1(HashAlg::Sha256, msg, sig)
+            }
+            (PublicKey::Rsa(k), scheme::RSA_PKCS1_SHA384) => {
+                k.verify_pkcs1(HashAlg::Sha384, msg, sig)
+            }
+            (PublicKey::Rsa(k), scheme::RSA_PKCS1_SHA512) => {
+                k.verify_pkcs1(HashAlg::Sha512, msg, sig)
+            }
+            _ => return self.verify(sig_scheme, msg, sig),
+        };
+        if ok {
+            Ok(())
+        } else {
+            Err(Error::new(
+                alert::DECRYPT_ERROR,
+                "signature does not verify",
+            ))
+        }
+    }
+
+    /// True for a key that can sign for a TLS 1.2 suite with `auth`.
+    pub fn fits(&self, auth: super::suites::Auth) -> bool {
+        use super::suites::Auth;
+        match self {
+            PublicKey::Ed25519(_) | PublicKey::Ec(..) => auth == Auth::Ecdsa,
+            PublicKey::Rsa(_) => auth == Auth::Rsa,
+            #[cfg(test)]
+            PublicKey::AcceptAny => true,
+        }
+    }
+}
+
+/// The schemes for a TLS 1.2 suite authenticated with `auth`.
+pub(crate) fn fits_auth(s: u16, auth: super::suites::Auth) -> bool {
+    use super::suites::Auth;
+    match auth {
+        Auth::Ecdsa => matches!(
+            s,
+            scheme::ECDSA_SECP256R1_SHA256 | scheme::ECDSA_SECP384R1_SHA384 | scheme::ED25519
+        ),
+        Auth::Rsa => matches!(
+            s,
+            scheme::RSA_PSS_RSAE_SHA256
+                | scheme::RSA_PSS_RSAE_SHA384
+                | scheme::RSA_PSS_RSAE_SHA512
+                | scheme::RSA_PKCS1_SHA256
+                | scheme::RSA_PKCS1_SHA384
+                | scheme::RSA_PKCS1_SHA512
+        ),
+    }
+}
+
+/// The schemes offered when TLS 1.2 is enabled: the TLS 1.3 ones and
+/// PKCS#1 v1.5, which RFC 8446 4.2.3 allows to be listed for TLS 1.2.
+pub(crate) fn with_pkcs1(mut schemes: Vec<u16>) -> Vec<u16> {
+    schemes.extend_from_slice(&[
+        scheme::RSA_PKCS1_SHA256,
+        scheme::RSA_PKCS1_SHA384,
+        scheme::RSA_PKCS1_SHA512,
+    ]);
+    schemes
+}
+
 /// RSASSA-PSS-params (RFC 4055 3.1), limited to what is safe and in
 /// use: SHA-256, SHA-384 or SHA-512, MGF1 with the same hash, trailer 1.
 fn pss_params(alg: &mut Der) -> Result<(HashAlg, usize), CertError> {
@@ -236,6 +312,10 @@ pub trait Signer: Send + Sync {
     /// The first of `offered` this key can produce, in the peer's order.
     fn choose_scheme(&self, offered: &[u16]) -> Option<u16>;
     fn sign(&self, scheme: u16, msg: &[u8]) -> Result<Vec<u8>, Error>;
+    /// As `choose_scheme`, for TLS 1.2, where RSA PKCS#1 v1.5 is allowed.
+    fn choose_scheme12(&self, offered: &[u16]) -> Option<u16> {
+        self.choose_scheme(offered)
+    }
 }
 
 impl Signer for ed25519::SigningKey {

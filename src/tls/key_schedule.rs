@@ -150,6 +150,31 @@ pub fn verify_finished(expected: &[u8], received: &[u8]) -> bool {
     ct::eq(expected, received)
 }
 
+/// The TLS 1.2 PRF (RFC 5246 5): P_hash over `label || seed`.
+pub fn prf12(hash: HashAlg, secret: &[u8], label: &[u8], seed: &[u8], len: usize) -> Secret {
+    let mut ls = label.to_vec();
+    ls.extend_from_slice(seed);
+    let base = Hmac::new(hash, secret);
+    let mut a = {
+        let mut h = base.clone();
+        h.update(&ls);
+        h.finish()
+    };
+    let mut buf = Vec::with_capacity(len + hash.output_len());
+    while buf.len() < len {
+        let mut h = base.clone();
+        h.update(&a);
+        h.update(&ls);
+        buf.extend(h.finish());
+        let mut h = base.clone();
+        h.update(&a);
+        a = h.finish();
+    }
+    buf.truncate(len);
+    ct::wipe(&mut a);
+    Secret::new(buf)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,6 +185,28 @@ mod tests {
             .step_by(2)
             .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
             .collect()
+    }
+
+    // The P_SHA256 example circulated on the IETF TLS list and used by
+    // most implementations' tests; checked against OpenSSL's TLS1-PRF.
+    #[test]
+    fn tls12_prf_sha256() {
+        let out = prf12(
+            HashAlg::Sha256,
+            &hex("9bbe436ba940f017b17652849a71db35"),
+            b"test label",
+            &hex("a0ba9f936cda311827a6f796ffd5198c"),
+            100,
+        );
+        assert_eq!(
+            out.expose(),
+            hex(
+                "e3f229ba727be17b8d122620557cd453c2aab21d07c3d495329b52d4e61edb5a
+                 6b301791e90d35c9c9a46b4e14baf9af0fa022f7077def17abfd3797c0564bab
+                 4fbc91666e9def9b97fce34f796789baa48082d122ee42c5a72e5a5110fff701
+                 87347b66"
+            )
+        );
     }
 
     // The first steps of RFC 8448 section 3, which pin the label encoding

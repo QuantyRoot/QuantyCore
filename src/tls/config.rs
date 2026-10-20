@@ -7,7 +7,7 @@ use super::crypto::chacha20poly1305::ChaCha20Poly1305;
 use super::crypto::ct::Secret;
 use super::crypto::rand;
 use super::kx;
-use super::suites::{self, Suite};
+use super::suites::{self, Suite, Suite12};
 use super::x509::{PrivateKey, RootStore, Usage, Verifier};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -72,6 +72,7 @@ pub struct ClientConfig {
     pub(crate) verifier: Arc<dyn PeerVerifier>,
     pub(crate) client_cert: Option<ClientCertificate>,
     pub(crate) tickets: Option<Arc<TicketCache>>,
+    pub(crate) tls12: bool,
 }
 
 impl ClientConfig {
@@ -99,7 +100,14 @@ impl ClientConfig {
             verifier,
             client_cert: None,
             tickets: Some(Arc::new(TicketCache::default())),
+            tls12: false,
         }
+    }
+
+    /// Also offers TLS 1.2, for servers that do not speak 1.3 yet. Only
+    /// ECDHE with an AEAD and the extended master secret (ADR-028).
+    pub fn enable_tls12(&mut self) {
+        self.tls12 = true;
     }
 
     /// Protocols for ALPN, most preferred first. HTTP/2 is `b"h2"`.
@@ -153,6 +161,11 @@ pub struct ServerConfig {
     pub(crate) tickets: Option<TicketKey>,
     pub(crate) ticket_lifetime: Duration,
     pub(crate) tickets_per_handshake: usize,
+    pub(crate) tls12: bool,
+    pub(crate) suites12: Vec<Suite12>,
+    /// Behaves like a server that has never heard of TLS 1.3, for tests
+    /// of the 1.2 handshake between two connections of this crate.
+    pub(crate) max_tls12: bool,
 }
 
 impl ServerConfig {
@@ -190,7 +203,16 @@ impl ServerConfig {
             tickets: Some(TicketKey::generate()?),
             ticket_lifetime: Duration::from_secs(24 * 3600),
             tickets_per_handshake: 2,
+            tls12: false,
+            suites12: suites::ALL_TLS12.to_vec(),
+            max_tls12: false,
         })
+    }
+
+    /// Also accepts TLS 1.2 from clients that do not offer 1.3. Only
+    /// ECDHE with an AEAD and the extended master secret (ADR-028).
+    pub fn enable_tls12(&mut self) {
+        self.tls12 = true;
     }
 
     /// Protocols for ALPN, most preferred first. A client that offers
@@ -201,6 +223,12 @@ impl ServerConfig {
 
     pub fn disable_resumption(&mut self) {
         self.tickets = None;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn only_tls12(&mut self) {
+        self.tls12 = true;
+        self.max_tls12 = true;
     }
 
     #[cfg(test)]
