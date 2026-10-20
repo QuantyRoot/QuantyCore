@@ -17,6 +17,7 @@ through and add a new entry, never silently edit history.
 - [ADR-020](#adr-020-tls-scope-widened-to-a-complete-implementation) TLS scope widened to a complete implementation
 - [ADR-021](#adr-021-aead-built-for-constant-time-not-speed) AEAD built for constant time, not speed
 - [ADR-022](#adr-022-the-tls-13-handshake-sans-io-compatibility-mode-stateless-tickets) The TLS 1.3 handshake: sans I/O, compatibility mode, stateless tickets
+- [ADR-023](#adr-023-constant-time-is-measured-not-assumed) Constant time is measured, not assumed
 
 ## ADR-001: Nothing outside the standard library, and QuantyRoot is not outside
 
@@ -505,3 +506,32 @@ client records byte for byte, and the server has to produce the trace's
 ServerHello; loopback tests of both sides against each other; and
 tampered hellos in both directions, each of which must end with the
 alert RFC 8446 prescribes.
+
+## ADR-023: Constant time is measured, not assumed
+
+`tests/tls_timing.rs` runs each secret handling primitive on a fixed and
+a random class of secret input in random order and compares the two
+timing distributions with Welch's t-test, as dudect does. Its first test
+is a comparison with an early exit, which it must flag, so a run that
+cannot see a leak fails instead of passing.
+
+**It already paid for itself.** Ed25519 signing showed |t| of 27 with
+ten thousand samples. The cause was the bit by bit reduction modulo the
+group order: the source selects with a mask, `(r & !m) | (s & m)`, and
+the optimizer recognised that the mask is all ones or zero and compiled
+a branch on the borrow. Zero scalars reduced twice as fast as random
+ones. Hiding the mask behind `std::hint::black_box` closed it, and the
+same guard went onto the one masked selection in Poly1305. The X25519
+ladder, which selects through the same kind of mask inside
+`Fe::cswap`, was already guarded and measured clean.
+
+**What it cannot show.** A t-test finds differences in the mean or the
+spread; it sees nothing on inputs it does not generate, nothing below
+its resolution with the given number of samples, and nothing on a
+processor that is not the CI runner's. It is evidence against a leak,
+not a proof, which is why the source still follows the rules of ADR-003
+and why a review is still required before anything is called secure.
+
+**Cost.** A CI job of a few minutes. Shared runners are noisy, so a
+primitive only fails when two consecutive runs cross the threshold; a
+leak large enough to matter crosses it every time.

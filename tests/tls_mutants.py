@@ -20,6 +20,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 UNIT = ["--lib"]
 VECTORS = ["--release", "--test", "tls_vectors"]
+TIMING = ["--release", "--test", "tls_timing"]
 
 # name, file, text to find (exactly once), replacement, cargo test args,
 # test filter, environment the test needs
@@ -535,6 +536,20 @@ MUTANTS = [
         "if false {",
         UNIT, "a_requested_key_update_is_answered", [],
     ),
+    (
+        "ed25519: masked selection the optimizer may turn into a branch",
+        "src/tls/crypto/ed25519.rs",
+        "let keep_s = std::hint::black_box(borrow).wrapping_sub(1);",
+        "let keep_s = borrow.wrapping_sub(1);",
+        TIMING, "ed25519_sign", [],
+    ),
+    (
+        "timing: a comparison with an early exit",
+        "src/tls/crypto/ct.rs",
+        "    let mut acc = 0u8;\n    for (x, y) in a.iter().zip(b) {\n        acc |= x ^ y;\n    }",
+        "    let mut acc = 0u8;\n    for (x, y) in a.iter().zip(b) {\n        if x != y {\n            return false;\n        }\n        acc |= x ^ y;\n    }",
+        TIMING, "ct_eq", [],
+    ),
 ]
 
 
@@ -569,7 +584,8 @@ def main():
         open(full, "w").write(original.replace(find, repl))
         try:
             start = time.time()
-            r = run(["cargo", "test", *args, test], env)
+            extra = ["--", "--ignored"] if args is TIMING else []
+            r = run(["cargo", "test", *args, test, *extra], env)
             out = r.stdout + r.stderr
             if r.returncode == 0:
                 print(f"FAIL  {name}: {test} stayed green")

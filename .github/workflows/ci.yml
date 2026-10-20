@@ -113,3 +113,15 @@ jobs:
           QUANTY_CAVP: ${{ runner.temp }}/cavp
           QUANTY_RFC8448: ${{ runner.temp }}/rfc/rfc8448.txt
           QUANTY_ACVP_LDT: 1
+
+  # Timing is noisy on shared runners; the test only fails when two runs
+  # in a row cross dudect's threshold, and its own counter check proves
+  # in each run that the harness can see a leak at all.
+  tls-timing:
+    name: TLS primitives in constant time (dudect)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.0
+      - name: timing of every secret handling primitive
+        run: cargo test --release --test tls_timing -- --ignored --test-threads 1 --nocapture

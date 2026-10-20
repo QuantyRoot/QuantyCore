@@ -218,7 +218,7 @@ impl Poly1305 {
             g[i] &= M26;
         }
         g[4] = (h[4] + c).wrapping_sub(1 << 26);
-        let keep_g = (g[4] >> 31).wrapping_sub(1);
+        let keep_g = std::hint::black_box(g[4] >> 31).wrapping_sub(1);
         for i in 0..5 {
             h[i] = (h[i] & !keep_g) | (g[i] & keep_g);
         }

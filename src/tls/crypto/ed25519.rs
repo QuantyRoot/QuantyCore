@@ -189,7 +189,11 @@ fn reduce(x: &[u8]) -> [u64; 4] {
             s[j] = d2;
             borrow = (b1 | b2) as u64;
         }
-        let keep_s = borrow.wrapping_sub(1);
+        // Without black_box the optimizer sees that the mask is all ones
+        // or zero and turns the selection into a branch on the borrow,
+        // which the timing test caught: zero scalars reduced twice as
+        // fast as random ones.
+        let keep_s = std::hint::black_box(borrow).wrapping_sub(1);
         for j in 0..4 {
             r[j] = (r[j] & !keep_s) | (s[j] & keep_s);
         }
