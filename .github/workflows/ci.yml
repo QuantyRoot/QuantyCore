@@ -44,6 +44,20 @@ jobs:
         env:
           QUANTY_HPACK_CASES: ${{ runner.temp }}/hpack-test-case
 
+  json-suite:
+    name: JSON against JSONTestSuite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.0
+      - name: fetch the suite at a pinned commit
+        run: |
+          git clone --quiet https://github.com/nst/JSONTestSuite "$RUNNER_TEMP/JSONTestSuite"
+          git -C "$RUNNER_TEMP/JSONTestSuite" checkout --quiet 1ef36fa01286573e846ac449e8683f8833c5b26a
+      - run: cargo test --release --test json_suite -- --nocapture
+        env:
+          QUANTY_JSON_SUITE: ${{ runner.temp }}/JSONTestSuite/test_parsing
+
   msrv:
     name: test on MSRV (1.89)
     runs-on: ubuntu-latest

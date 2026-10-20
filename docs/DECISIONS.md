@@ -12,6 +12,7 @@ through and add a new entry, never silently edit history.
 - [ADR-005](#adr-005-apache-20) Apache 2.0
 - [ADR-006](#adr-006-http2-and-grpc-on-blocking-threads-hardened-for-local-peers-first) HTTP/2 and gRPC on blocking threads, hardened for local peers first
 - [ADR-007](#adr-007-gzip-and-tar-stream-with-fixed-memory-and-accept-what-zlib-accepts) gzip and tar stream with fixed memory, and accept what zlib accepts
+- [ADR-008](#adr-008-json-is-strict-and-one-document-has-one-meaning) JSON is strict, and one document has one meaning
 
 ## ADR-001: Nothing outside the standard library, and QuantyRoot is not outside
 
@@ -262,4 +263,34 @@ container escape there is.
 `gzip -dc` on the same machine. Tests compare against Python's zlib,
 the gzip command and GNU tar in all three formats, and each was shown to
 fail when the code was broken on purpose.
+
+## ADR-008: JSON is strict, and one document has one meaning
+
+Image manifests, image configs, registry token responses and CNI
+configuration are JSON from outside, and some of it is hashed: an image
+is named by the digest of its manifest's bytes. `json.rs` parses RFC
+8259 strictly and refuses what would let one document mean two things:
+
+- duplicate keys in an object, compared after unescaping, because which
+  duplicate wins differs between parsers, and a manifest that one tool
+  reads one way and another tool the other is how verification is
+  bypassed;
+- a byte order mark, which RFC 8259 forbids senders to add and which
+  would give one value two encodings with different digests;
+- lone surrogates, control characters in strings and every relaxation
+  (trailing commas, comments, leading zeros, NaN).
+
+Numbers keep their source text. An integer is read only if it fits, and
+`1e400` is kept as written rather than becoming infinity, so nothing is
+silently rounded on the way through. Nesting stops at 128 levels and the
+parser uses no recursion, so input cannot overflow the stack.
+
+**Checked against:** JSONTestSuite, all 188 documents that must be
+rejected are rejected and 93 of the 95 that must be accepted are; the two
+others contain duplicate keys and are listed as refused on purpose. The
+writer's output matches Python's `json.dumps` byte for byte.
+
+**The cost:** a document with duplicate keys that other tools accept is
+refused here. If a real registry ever serves one, this record is where
+that gets decided again.
 

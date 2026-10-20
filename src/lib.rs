@@ -7,5 +7,6 @@ pub mod grpc;
 pub mod h2;
 pub mod hpack;
 pub mod inflate;
+pub mod json;
 pub mod proto;
 pub mod tar;

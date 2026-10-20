@@ -19,6 +19,7 @@ on the Rust standard library.
 | gRPC server on blocking sockets, unary client | built, tested |
 | gzip and DEFLATE, streaming | built, tested |
 | tar: ustar, GNU, PAX, streaming | built, tested |
+| JSON, strict RFC 8259 | built, tested |
 | TLS 1.3 | planned, see below |
 
 Planned means no code exists yet.
