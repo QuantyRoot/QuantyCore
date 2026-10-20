@@ -427,7 +427,10 @@ fn end_of_requests(
             let service = service.clone();
             pool.run(Box::new(move || {
                 let result = match msgs.as_slice() {
-                    [one] => service.unary(&method, one),
+                    [one] => std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        service.unary(&method, one)
+                    }))
+                    .unwrap_or_else(|_| Err(Status::new(code::INTERNAL, "handler panicked"))),
                     _ => Err(Status::new(
                         code::INTERNAL,
                         "a unary call needs exactly one request message",
@@ -556,6 +559,7 @@ mod tests {
         fn unary(&self, method: &str, req: &[u8]) -> Result<Vec<u8>, Status> {
             match method {
                 "/test.Echo/Say" => Ok(req.to_vec()),
+                "/test.Echo/Panic" => panic!("on purpose"),
                 _ => Err(Status::new(code::UNIMPLEMENTED, "no such method: 100%")),
             }
         }
@@ -667,6 +671,17 @@ mod tests {
         let (client, server) = UnixStream::pair().unwrap();
         std::thread::spawn(move || serve_connection(server, Arc::new(Echo), Pool::new(1)));
         let err = super::call(&client, "/test.Echo/Nope", b"").unwrap_err();
+        assert_eq!(err.code, code::UNIMPLEMENTED);
+        let pool = Pool::new(1);
+        let serve = |pool: Arc<Pool>| {
+            let (client, server) = UnixStream::pair().unwrap();
+            std::thread::spawn(move || serve_connection(server, Arc::new(Echo), pool));
+            client
+        };
+        let panicked = super::call(serve(pool.clone()), "/test.Echo/Panic", b"").unwrap_err();
+        assert_eq!(panicked.code, code::INTERNAL);
+        let after = super::call(serve(pool), "/test.Echo/Say", b"x");
+        assert!(after.is_ok(), "the only pool thread survived the panic");
         assert_eq!(
             (err.code, err.message.as_str()),
             (code::UNIMPLEMENTED, "no such method: 100%25")
