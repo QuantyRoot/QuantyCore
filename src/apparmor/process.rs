@@ -89,7 +89,68 @@ impl Processor<'_> {
         Ok(())
     }
 
+    /// What an `all` rule implies here: every file permission but exec,
+    /// inherit execution two priorities lower so that any other exec
+    /// rule wins, and every capability. The rule's prefix is applied
+    /// twice, once when the rule is made and once to each implied rule,
+    /// so `deny all` ends up unquieted and `audit deny all` quieted. The rule kinds compiled into the
+    /// policy automaton are implied when those kinds are compiled.
+    fn all_rules(&mut self, prof: &mut Profile) -> R<()> {
+        let alls: Vec<(Prefix, super::source::Span)> = prof
+            .rules
+            .iter()
+            .filter_map(|r| match r {
+                PolicyRule::Pending {
+                    rule: super::ast::Rule::All,
+                    prefix,
+                    span,
+                } => Some((*prefix, *span)),
+                _ => None,
+            })
+            .collect();
+        for (p, span) in alls {
+            let p = super::build::rule_prefix(&p);
+            let deny = p.mode == RuleMode::Deny;
+            let mut perms = BASE_PERMS & !(EXEC_TYPE | MAY_EXEC);
+            if !deny {
+                perms |= perms << OTHER_SHIFT;
+            }
+            let mut e = Entry::new(b"/{**,}".to_vec(), perms, None, span);
+            super::build::entry_add_prefix(&mut e, &p)
+                .map_err(|m| self.sources.error_at(span, m))?;
+            prof.add_entry(e);
+
+            let mut perms = MAY_EXEC;
+            if !deny {
+                perms |= EXEC_INHERIT;
+            }
+            perms |= perms << OTHER_SHIFT;
+            let ix = Prefix {
+                priority: p.priority - 2,
+                ..p
+            };
+            let mut e = Entry::new(b"/{**,}".to_vec(), perms, None, span);
+            super::build::entry_add_prefix(&mut e, &ix)
+                .map_err(|m| self.sources.error_at(span, m))?;
+            prof.add_entry(e);
+
+            if deny {
+                prof.caps.deny |= u64::MAX;
+                if p.audit != Audit::Force {
+                    prof.caps.quiet |= u64::MAX;
+                }
+            } else {
+                prof.caps.allow |= u64::MAX;
+                if p.audit != Audit::Unspecified {
+                    prof.caps.audit |= u64::MAX;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn profile(&mut self, prof: &mut Profile, parents: &[Vec<u8>]) -> R<()> {
+        self.all_rules(prof)?;
         if prof.is_hat() || !prof.hats.is_empty() {
             let span = prof.span;
             prof.add_entry(Entry::new(

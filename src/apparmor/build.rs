@@ -639,6 +639,12 @@ impl<'s> Builder<'s> {
                     }
                 }
             }
+            A::All if prefix.priority != 0 => {
+                return Err(self.err(span, "priority prefix not allowed on all rules"));
+            }
+            A::All if prefix.owner != Owner::Unspecified => {
+                return Err(self.err(span, "owner prefix not allowed on all rules"));
+            }
             other => prof.rules.push(PolicyRule::Pending {
                 rule: other.clone(),
                 prefix,
@@ -946,6 +952,18 @@ fn check_x_qualifier(e: &Entry) -> Result<(), String> {
 /// Applies a prefix to a file entry the way upstream does: the mode is
 /// replaced, owner and other mask the permissions, and a deny without
 /// audit is quiet.
+/// The prefix a non-file rule keeps once upstream's add_prefix has
+/// applied it: `deny` alone turns into a forced audit, which for a deny
+/// rule means quiet, and `audit deny` loses its audit.
+pub(crate) fn rule_prefix(p: &Prefix) -> Prefix {
+    let audit = match (p.mode, p.audit) {
+        (RuleMode::Deny, Audit::Force) => Audit::Unspecified,
+        (RuleMode::Deny, _) => Audit::Force,
+        (_, a) => a,
+    };
+    Prefix { audit, ..*p }
+}
+
 pub(crate) fn entry_add_prefix(e: &mut Entry, p: &Prefix) -> Result<(), String> {
     e.mode = p.mode;
     match p.owner {

@@ -57,6 +57,16 @@ impl Perms {
         self.quiet &= !bits;
     }
 
+    /// The two accept table entries of a kernel that takes no
+    /// permissions table: the allow mask, and audit and quiet packed as
+    /// upstream's PACK_AUDIT_CTL packs them.
+    pub fn accept_pair(&self) -> (u32, u32) {
+        (
+            self.allow,
+            (self.audit & 0x1f_c07f) | ((self.quiet & 0x1f_c07f) << 7),
+        )
+    }
+
     /// Folds denials into the allow and prompt masks, for kernels whose
     /// tables carry no deny mask. Audit and quiet stay as computed.
     pub fn apply_deny(mut self) -> Perms {

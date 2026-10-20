@@ -12,8 +12,11 @@
 //! `MAX_PENDING`. A case that must be accepted and is refused always
 //! fails the test.
 
-use std::path::{Path, PathBuf};
+mod apparmor_common;
 
+use std::path::PathBuf;
+
+use apparmor_common::{read_case, walk};
 use quantycore::apparmor::{check, Features, FsResolver, Options};
 
 /// Cases marked TODO are ones upstream knows it gets wrong. The reference
@@ -25,67 +28,11 @@ const TODO_INVERTED: bool = true;
 const DIFFERS_ON_PURPOSE: &[(&str, &str)] = &[];
 
 /// Refusals that later stages will add. Lowered with each stage.
-const MAX_PENDING: usize = 2_213;
+const MAX_PENDING: usize = 2_212;
 
 /// The suite at the pinned commit has 73737 cases; fewer means the
 /// checkout or the generation step went wrong.
 const MIN_CASES: usize = 73_000;
-
-struct Case {
-    expect_pass: bool,
-    todo: bool,
-    disabled: bool,
-    body: Vec<u8>,
-}
-
-fn read_case(path: &Path) -> Case {
-    let text = std::fs::read(path).unwrap();
-    let mut expect_pass = true;
-    let mut todo = false;
-    let mut disabled = false;
-    let mut body = Vec::new();
-    for line in text.split_inclusive(|&b| b == b'\n') {
-        if line.len() >= 13 && line[..13].eq_ignore_ascii_case(b"#=DESCRIPTION") {
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix(b"#=EXRESULT") {
-            let word: Vec<u8> = rest
-                .iter()
-                .copied()
-                .skip_while(|b| b.is_ascii_whitespace())
-                .take_while(|b| b.is_ascii_alphanumeric() || *b == b'_')
-                .collect();
-            expect_pass = match &word[..] {
-                b"PASS" => true,
-                b"FAIL" => false,
-                other => panic!("{}: unknown result {:?}", path.display(), other),
-            };
-        } else if line.starts_with(b"#=TODO") {
-            todo = true;
-        } else if line.starts_with(b"#=DISABLED") {
-            disabled = true;
-        } else if !disabled {
-            body.extend_from_slice(line);
-        }
-    }
-    Case {
-        expect_pass,
-        todo,
-        disabled,
-        body,
-    }
-}
-
-fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
-    for e in std::fs::read_dir(dir).unwrap() {
-        let p = e.unwrap().path();
-        if p.is_dir() {
-            walk(&p, out);
-        } else if p.extension().is_some_and(|x| x == "sd") {
-            out.push(p);
-        }
-    }
-}
 
 #[test]
 fn simple_tests() {

@@ -1076,11 +1076,18 @@ corpus comes near them.
 to port faithfully, and since the minimal automaton is unique, their
 result is the same.
 
-**Checked by:** unit tests on factoring, permission combination,
-conflicts, minimization and limits; upstream's simple_tests, whose
-exec conflict cases are refused; the corpus, all 435 profiles of which
-compile.
+**Checked by:** `tests/apparmor_diff.rs`, which builds the reference
+`apparmor_parser` at the pinned commit, compiles every simple_tests case
+both accept (53,101 cases, 55,190 profiles) and every corpus profile
+(435) with both, reads upstream's binary policy, and walks each of
+upstream's automata together with ours over every byte and the out of
+band symbol, the way the kernel's matcher steps. At every pair of states
+reached, both must give the kernel the same accept entries, and each
+profile's exec table must name the same targets. All match. Planting a
+single fault (dropping the implied `m` of `ix`) makes 4,470 cases and
+29 corpus profiles differ. Unit tests cover factoring, permission
+combination, conflicts, minimization and limits.
 
 **Cost:** an automaton is compared with upstream's only through its
 behaviour, so a difference shows up as a differing state, not as a
-differing step.
+differing step, and the test needs upstream built from source.
