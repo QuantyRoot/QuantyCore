@@ -23,6 +23,7 @@ use quantycore::tls::crypto::gcm::AesGcm;
 use quantycore::tls::crypto::hkdf;
 use quantycore::tls::crypto::hmac::hmac;
 use quantycore::tls::crypto::sha2::HashAlg;
+use quantycore::tls::crypto::x25519;
 use tls_common::{load, rsp, suite, Json};
 
 fn acvp(name: &str) -> Option<Json> {
@@ -345,4 +346,43 @@ fn wycheproof_aes_gcm() {
 #[test]
 fn wycheproof_chacha20_poly1305() {
     wycheproof_aead::<ChaCha20Poly1305>("chacha20_poly1305_test.json", &[256]);
+}
+
+/// Twist points, non-canonical encodings of u and the edge cases of the
+/// ladder all compute the RFC 7748 function; low order points must give
+/// the all-zero secret, which the key agreement then refuses.
+#[test]
+fn wycheproof_x25519() {
+    let Some(doc) = wycheproof("x25519_test.json") else {
+        return;
+    };
+    let (mut n, mut zero) = (0, 0);
+    for group in doc.list("testGroups") {
+        for t in group.list("tests") {
+            let at = t.num("tcId");
+            let private: [u8; 32] = t.hex("private").try_into().unwrap();
+            let public: [u8; 32] = t.hex("public").try_into().unwrap();
+            let shared = t.hex("shared");
+            assert_ne!(
+                t.str("result"),
+                "invalid",
+                "tcId {at}: no invalid cases expected"
+            );
+            assert_eq!(
+                x25519::x25519(&private, &public).to_vec(),
+                shared,
+                "tcId {at}"
+            );
+            let dh = x25519::PrivateKey::from_bytes(&private).diffie_hellman(&public);
+            if shared == [0; 32] {
+                assert!(dh.is_none(), "tcId {at}: zero secret accepted");
+                zero += 1;
+            } else {
+                assert_eq!(dh.unwrap().expose(), &shared[..], "tcId {at}");
+            }
+            n += 1;
+        }
+    }
+    eprintln!("X25519: {n} cases, {zero} with a zero secret");
+    assert!(n >= 500 && zero >= 20, "Wycheproof X25519 incomplete");
 }
