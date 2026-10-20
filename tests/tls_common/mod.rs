@@ -255,3 +255,72 @@ impl Parser<'_> {
         }
     }
 }
+
+/// One section of a CAVP `.rsp` file: the bracketed parameters above it
+/// and its records, each a list of `name = value` pairs plus bare flags
+/// such as `FAIL`.
+pub struct RspRecord {
+    pub params: Vec<(String, String)>,
+    pub fields: Vec<(String, String)>,
+}
+
+impl RspRecord {
+    pub fn param(&self, k: &str) -> &str {
+        self.params
+            .iter()
+            .find(|(n, _)| n == k)
+            .map(|(_, v)| v.as_str())
+            .unwrap_or_else(|| panic!("no parameter {k}"))
+    }
+    pub fn get(&self, k: &str) -> Option<&str> {
+        self.fields
+            .iter()
+            .find(|(n, _)| n == k)
+            .map(|(_, v)| v.as_str())
+    }
+    pub fn hex(&self, k: &str) -> Vec<u8> {
+        hex(self
+            .get(k)
+            .unwrap_or_else(|| panic!("no field {k}"))
+            .as_bytes())
+    }
+    pub fn has_flag(&self, k: &str) -> bool {
+        self.fields.iter().any(|(n, v)| n == k && v.is_empty())
+    }
+}
+
+pub fn rsp(path: &std::path::Path) -> Vec<RspRecord> {
+    let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let mut params: Vec<(String, String)> = Vec::new();
+    let mut params_open = false;
+    let mut out = Vec::new();
+    let mut cur: Option<RspRecord> = None;
+    for line in text.lines().map(str::trim) {
+        if line.starts_with('#') {
+            continue;
+        }
+        if line.is_empty() {
+            out.extend(cur.take());
+            continue;
+        }
+        if let Some(p) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            out.extend(cur.take());
+            if !params_open {
+                params.clear();
+                params_open = true;
+            }
+            let (k, v) = p.split_once('=').unwrap_or((p, ""));
+            params.push((k.trim().into(), v.trim().into()));
+            continue;
+        }
+        params_open = false;
+        let rec = cur.get_or_insert_with(|| RspRecord {
+            params: params.clone(),
+            fields: Vec::new(),
+        });
+        let (k, v) = line.split_once('=').unwrap_or((line, ""));
+        rec.fields.push((k.trim().into(), v.trim().into()));
+    }
+    out.extend(cur);
+    out
+}

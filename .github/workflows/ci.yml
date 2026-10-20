@@ -66,10 +66,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.89
       - run: cargo test --workspace --locked
 
-  # NIST ACVP and Wycheproof at pinned commits. Bumping a pin is its own
+  # NIST ACVP and Wycheproof at pinned commits, CAVP by checksum. Bumping a pin is its own
   # commit, so a changed vector never arrives together with changed code.
   tls-vectors:
-    name: TLS primitives against NIST ACVP and Wycheproof
+    name: TLS primitives against NIST ACVP, CAVP and Wycheproof
     runs-on: ubuntu-latest
     env:
       ACVP_COMMIT: 975de31eb83d87039ec88934fdc47d8c312b892d
@@ -85,6 +85,7 @@ jobs:
           QUANTY_VECTORS_REQUIRED: 1
           QUANTY_ACVP: ${{ runner.temp }}/acvp/gen-val/json-files
           QUANTY_WYCHEPROOF: ${{ runner.temp }}/wycheproof/testvectors_v1
+          QUANTY_CAVP: ${{ runner.temp }}/cavp
           QUANTY_ACVP_LDT: 1
 
   tls-mutants:
@@ -104,4 +105,5 @@ jobs:
           QUANTY_VECTORS_REQUIRED: 1
           QUANTY_ACVP: ${{ runner.temp }}/acvp/gen-val/json-files
           QUANTY_WYCHEPROOF: ${{ runner.temp }}/wycheproof/testvectors_v1
+          QUANTY_CAVP: ${{ runner.temp }}/cavp
           QUANTY_ACVP_LDT: 1

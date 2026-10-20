@@ -15,6 +15,7 @@ through and add a new entry, never silently edit history.
 - [ADR-008](#adr-008-json-is-strict-and-one-document-has-one-meaning) JSON is strict, and one document has one meaning
 - [ADR-009](#adr-009-http11-for-registries-with-one-reading-of-every-response) HTTP/1.1 for registries, with one reading of every response
 - [ADR-020](#adr-020-tls-scope-widened-to-a-complete-implementation) TLS scope widened to a complete implementation
+- [ADR-021](#adr-021-aead-built-for-constant-time-not-speed) AEAD built for constant time, not speed
 
 ## ADR-001: Nothing outside the standard library, and QuantyRoot is not outside
 
@@ -417,3 +418,41 @@ and a second state machine that has to be kept as strict as the first.
 **Rejected:** keeping the narrow scope and widening per peer. Each
 widening would have touched the handshake again, and a handshake
 reopened five times is reviewed five times or not at all.
+
+## ADR-021: AEAD built for constant time, not speed
+
+AES is bitsliced four blocks at a time: the 64 bytes of four blocks are
+transposed into eight 64-bit bit planes and the S-box is the Boyar and
+Peralta circuit, so no byte value ever selects a memory address. GHASH
+multiplies with integer multiplications on operands spread out with
+three zero bits between data bits, the method of BearSSL's
+`ghash_ctmul64`, instead of the usual table of multiples of H.
+ChaCha20-Poly1305 needs no such care; it is constant time as written.
+
+**What it costs.** Measured once while writing this, on the development
+machine: AES-128-GCM here is roughly two orders of magnitude slower than
+OpenSSL's, which uses the AES and carryless multiply instructions, and
+ChaCha20-Poly1305 here is about four times faster than AES-GCM here. For
+the consumers in ADR-003 (control plane traffic, image pulls) this is
+acceptable; for bulk transfer it is not, and hardware AES behind its own
+record is the answer then, as ADR-003 already says.
+
+Because of that ratio, a server built on this crate prefers
+ChaCha20-Poly1305 whenever the client offers it, and falls back to
+AES-GCM otherwise. Clients state their own preference as usual.
+
+**Narrowed on purpose:**
+
+- Only AES encryption is built. GCM and TLS never run AES backwards.
+- No AES-192: no TLS cipher suite uses it.
+- Only 96-bit nonces and 128-bit tags, the only ones TLS uses. Other
+  nonce lengths in GCM go through GHASH and are a known source of nonce
+  collisions.
+- Opening checks the tag before decrypting anything, and on failure leaves
+  the buffer exactly as it was, so no unauthenticated plaintext can leak
+  to a caller that ignores the error.
+
+**Rejected:** a 32-bit bitsliced AES on two blocks, which is simpler but
+half as fast on the 64-bit machines every consumer runs on; and table
+based AES with the tables preloaded into cache before every block, which
+narrows the leak but does not close it.

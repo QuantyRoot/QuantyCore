@@ -127,8 +127,8 @@ const K512: [u64; 80] = [
 
 fn compress256(state: &mut [u32; 8], block: &[u8]) {
     let mut w = [0u32; 64];
-    for (i, c) in block.chunks_exact(4).enumerate() {
-        w[i] = u32::from_be_bytes([c[0], c[1], c[2], c[3]]);
+    for (i, c) in block.as_chunks::<4>().0.iter().enumerate() {
+        w[i] = u32::from_be_bytes(*c);
     }
     for i in 16..64 {
         let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
@@ -167,8 +167,8 @@ fn compress256(state: &mut [u32; 8], block: &[u8]) {
 
 fn compress512(state: &mut [u64; 8], block: &[u8]) {
     let mut w = [0u64; 80];
-    for (i, c) in block.chunks_exact(8).enumerate() {
-        w[i] = u64::from_be_bytes(c.try_into().unwrap());
+    for (i, c) in block.as_chunks::<8>().0.iter().enumerate() {
+        w[i] = u64::from_be_bytes(*c);
     }
     for i in 16..80 {
         let s0 = w[i - 15].rotate_right(1) ^ w[i - 15].rotate_right(8) ^ (w[i - 15] >> 7);
@@ -239,11 +239,10 @@ impl<const B: usize> Buffer<B> {
             compress(&self.block);
             self.used = 0;
         }
-        let mut blocks = data.chunks_exact(B);
-        for b in &mut blocks {
+        let (blocks, rest) = data.as_chunks::<B>();
+        for b in blocks {
             compress(b);
         }
-        let rest = blocks.remainder();
         self.block[..rest.len()].copy_from_slice(rest);
         self.used = rest.len();
     }
@@ -309,7 +308,7 @@ impl Hash for Sha256 {
     fn finish_into(mut self, out: &mut [u8]) {
         let state = &mut self.state;
         self.buf.pad(8, |b| compress256(state, b));
-        for (o, w) in out.chunks_exact_mut(4).zip(self.state) {
+        for (o, w) in out.as_chunks_mut::<4>().0.iter_mut().zip(self.state) {
             o.copy_from_slice(&w.to_be_bytes());
         }
     }
@@ -336,7 +335,7 @@ impl Sha512Core {
         let state = &mut self.state;
         self.buf.pad(16, |b| compress512(state, b));
         let mut full = [0u8; 64];
-        for (o, w) in full.chunks_exact_mut(8).zip(self.state) {
+        for (o, w) in full.as_chunks_mut::<8>().0.iter_mut().zip(self.state) {
             o.copy_from_slice(&w.to_be_bytes());
         }
         out.copy_from_slice(&full[..out.len()]);

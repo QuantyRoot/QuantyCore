@@ -1,7 +1,9 @@
 #!/bin/sh
-# Checks out the vector suites the TLS tests read, at the commits pinned in
-# ACVP_COMMIT and WYCHEPROOF_COMMIT, into the directory given as $1.
-# ACVP is large, so only the algorithm directories in use are checked out.
+# Checks out the vector suites the TLS tests read into the directory given
+# as $1: ACVP and Wycheproof at the commits pinned in ACVP_COMMIT and
+# WYCHEPROOF_COMMIT, and the CAVP zip files, which have no version, pinned
+# by their SHA-256 below. ACVP is large, so only the algorithm directories
+# in use are checked out.
 set -eu
 
 dest=$1
@@ -24,3 +26,14 @@ fetch acvp https://github.com/usnistgov/ACVP-Server "$ACVP_COMMIT" \
      /gen-val/json-files/HMAC-SHA2-384-2.0/ /gen-val/json-files/HMAC-SHA2-512-2.0/"
 fetch wycheproof https://github.com/C2SP/wycheproof "$WYCHEPROOF_COMMIT" \
     "/testvectors_v1/"
+
+cavp() {
+    mkdir -p "$dest/cavp/$1"
+    curl --fail --silent --show-error --retry 3 -o "$dest/cavp/$1.zip" \
+        "https://csrc.nist.gov/CSRC/media/Projects/Cryptographic-Algorithm-Validation-Program/documents/$2"
+    echo "$3  $dest/cavp/$1.zip" | sha256sum -c --quiet
+    unzip -q -o "$dest/cavp/$1.zip" -d "$dest/cavp/$1"
+}
+
+cavp gcm mac/gcmtestvectors.zip \
+    f9fc479e134cde2980b3bb7cddbcb567b2cd96fd753835243ed067699f26a023
