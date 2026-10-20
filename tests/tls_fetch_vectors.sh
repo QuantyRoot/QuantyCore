@@ -37,3 +37,9 @@ cavp() {
 
 cavp gcm mac/gcmtestvectors.zip \
     f9fc479e134cde2980b3bb7cddbcb567b2cd96fd753835243ed067699f26a023
+
+mkdir -p "$dest/rfc"
+curl --fail --silent --show-error --retry 3 -o "$dest/rfc/rfc8448.txt" \
+    https://www.rfc-editor.org/rfc/rfc8448.txt
+echo "6564d1376d1ec744fc7a9993da15ebc1b9be361908b166091f47ef605c537fba  $dest/rfc/rfc8448.txt" |
+    sha256sum -c --quiet

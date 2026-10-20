@@ -87,6 +87,11 @@ jobs:
           QUANTY_WYCHEPROOF: ${{ runner.temp }}/wycheproof/testvectors_v1
           QUANTY_CAVP: ${{ runner.temp }}/cavp
           QUANTY_ACVP_LDT: 1
+      - name: the handshake against the RFC 8448 traces
+        run: cargo test --release --lib tls::rfc8448 -- --nocapture
+        env:
+          QUANTY_VECTORS_REQUIRED: 1
+          QUANTY_RFC8448: ${{ runner.temp }}/rfc/rfc8448.txt
 
   tls-mutants:
     name: TLS tests fail on deliberately broken code
@@ -106,4 +111,5 @@ jobs:
           QUANTY_ACVP: ${{ runner.temp }}/acvp/gen-val/json-files
           QUANTY_WYCHEPROOF: ${{ runner.temp }}/wycheproof/testvectors_v1
           QUANTY_CAVP: ${{ runner.temp }}/cavp
+          QUANTY_RFC8448: ${{ runner.temp }}/rfc/rfc8448.txt
           QUANTY_ACVP_LDT: 1
