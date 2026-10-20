@@ -13,6 +13,7 @@ through and add a new entry, never silently edit history.
 - [ADR-006](#adr-006-http2-and-grpc-on-blocking-threads-hardened-for-local-peers-first) HTTP/2 and gRPC on blocking threads, hardened for local peers first
 - [ADR-007](#adr-007-gzip-and-tar-stream-with-fixed-memory-and-accept-what-zlib-accepts) gzip and tar stream with fixed memory, and accept what zlib accepts
 - [ADR-008](#adr-008-json-is-strict-and-one-document-has-one-meaning) JSON is strict, and one document has one meaning
+- [ADR-009](#adr-009-http11-for-registries-with-one-reading-of-every-response) HTTP/1.1 for registries, with one reading of every response
 
 ## ADR-001: Nothing outside the standard library, and QuantyRoot is not outside
 
@@ -312,3 +313,41 @@ writer's output matches Python's `json.dumps` byte for byte.
 refused here. If a real registry ever serves one, this record is where
 that gets decided again.
 
+## ADR-009: HTTP/1.1 for registries, with one reading of every response
+
+QuantyKube's image puller fetches manifests and blobs from OCI
+registries. Every registry speaks HTTP/1.1, and HTTP/2 to them would need
+TLS with ALPN first. `http1.rs` is a blocking client: GET and HEAD
+without a body, over any `Read + Write` stream, so TLS goes under it
+later without changes here. A connection is reused only when the
+response ended exactly where its framing said.
+
+**Framing has one reading or none.** The responses come from servers
+nobody here controls, often through a CDN, and the known HTTP/1.1
+attacks are two parsers disagreeing about where a message ends. So, as
+RFC 9112 requires or allows: Content-Length together with
+Transfer-Encoding is refused; Transfer-Encoding must be exactly
+`chunked`; Content-Length must be digits, and repeats must agree; folded
+lines, whitespace before a colon, control bytes in fields, lines not
+ended by CRLF and chunk sizes past 64 bits are refused. Requests are
+checked the same way, so no caller value can add a line.
+
+**Memory is fixed,** as in ADR-007: the head, 1xx responses included,
+is held up to 64 KiB and 100 fields, trailers get the same and are
+dropped, a chunk-size line may be 4 KiB, and the body streams through a
+16 KiB buffer.
+
+**Redirects and credentials are the caller's.** Registries send blob
+downloads to storage on another host. `resolve` says where a Location
+points (RFC 3986 section 5.2, checked against every example there);
+whether to go, and keeping the registry token away from the storage
+host, is decided in QuantyKube. URLs with user info are refused.
+`parse_www_authenticate` reads the Bearer challenge, and refuses one that
+names a parameter twice, for the reason in ADR-008.
+
+Tested on in-memory streams and over a local TCP socket; each check was
+shown to fail its test when broken on purpose.
+
+**The cost:** a registry or proxy that sends bare LF line endings,
+folded headers or any transfer coding but chunked cannot be pulled from
+until this record is revisited.

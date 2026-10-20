@@ -20,6 +20,7 @@ on the Rust standard library.
 | gzip and DEFLATE, streaming | built, tested |
 | tar: ustar, GNU, PAX, streaming | built, tested |
 | JSON, strict RFC 8259 | built, tested |
+| HTTP/1.1 client for registries, blocking | built, tested |
 | TLS 1.3 | planned, see below |
 
 Planned means no code exists yet.
