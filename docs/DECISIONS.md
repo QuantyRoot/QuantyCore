@@ -10,6 +10,7 @@ through and add a new entry, never silently edit history.
 - [ADR-003](#adr-003-tls-is-written-here) TLS is written here
 - [ADR-004](#adr-004-the-wire-protocols-live-here-in-one-crate) The wire protocols live here, in one crate
 - [ADR-005](#adr-005-apache-20) Apache 2.0
+- [ADR-006](#adr-006-http2-and-grpc-on-blocking-threads-hardened-for-local-peers-first) HTTP/2 and gRPC on blocking threads, hardened for local peers first
 
 ## ADR-001: Nothing outside the standard library, and QuantyRoot is not outside
 
@@ -191,3 +192,39 @@ QuantyKube; that project's ADR-007 gives the full reasoning. For a library
 the deciding point is simpler: it is meant to be used by Quanty projects
 and by anyone else, and Apache 2.0 is compatible with both the MIT license
 QuantyDB uses and the Apache 2.0 that QuantyKube uses.
+
+
+## ADR-006: HTTP/2 and gRPC on blocking threads, hardened for local peers first
+
+The HTTP/2 connection is a state machine without I/O (`h2.rs`), so it can
+run under any loop: QuantyDB's reactor, a TLS layer, or a plain thread.
+The gRPC server on top (`grpc.rs`) uses the plainest of those: a thread
+reads each connection, unary calls run on a fixed pool, and every
+streaming call gets its own thread. Watches live for hours, and a pool
+would let a few hundred of them starve every unary call.
+
+That shape was chosen because the first consumer, QuantyKube, serves one
+API server over a Unix socket: a few connections, a few hundred streams,
+a trusted peer. It was checked against curl's nghttp2 in both directions
+and against etcd's Go client.
+
+What it already refuses: frames above the advertised size, header blocks
+above twice the advertised list size (which also ends the CONTINUATION
+flood), windows past 2^31-1, streams beyond the advertised limit, request
+messages above 16 MiB, and streaming responses beyond 4 MiB waiting on
+flow control, after which the sender blocks.
+
+What it does not handle yet, because none of it matters on a local socket
+with one trusted client and all of it matters on a network:
+
+- a peer that opens and resets streams as fast as it can (the 2023 rapid
+  reset attack): every unary call it opens still runs to completion;
+- a peer that floods PINGs or SETTINGS and never reads the replies;
+- a peer that opens the maximum number of streaming calls, each of which
+  costs a thread;
+- idle connections, which nothing times out.
+
+**The cost:** none today, a hole the day this listens on a network. TLS is
+the point where that happens (ADR-003), so these four come before any
+listener that accepts a connection from another machine, and that rule is
+the reason this record exists.
