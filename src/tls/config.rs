@@ -108,7 +108,14 @@ impl ClientConfig {
 
     pub(crate) fn with_verifier(verifier: Arc<dyn PeerVerifier>) -> ClientConfig {
         ClientConfig {
-            suites: suites::ALL_TLS13.to_vec(),
+            // ChaCha20-Poly1305 first, as on the server (ADR-021,
+            // ADR-031); servers that honour the client's order then pick
+            // the faster cipher.
+            suites: vec![
+                suites::TLS_CHACHA20_POLY1305_SHA256,
+                suites::TLS_AES_128_GCM_SHA256,
+                suites::TLS_AES_256_GCM_SHA384,
+            ],
             groups: kx::SUPPORTED_GROUPS.to_vec(),
             alpn: Vec::new(),
             verifier,

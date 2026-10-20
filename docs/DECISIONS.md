@@ -808,3 +808,21 @@ RSA) and showing their names; requests written by OpenSSL (Ed25519,
 P-384, RSA) read here, with a flipped signature bit refused, and a
 certificate issued from each verified by OpenSSL; a forged request with
 another key's signature refused; the fuzzer; and two mutants.
+
+## ADR-031: The client prefers ChaCha20-Poly1305 too
+
+ADR-021 put ChaCha20-Poly1305 first on the server. The client now does
+the same. Measured on one x86-64 machine with 16 KiB records, sealing
+runs at about 370 MB/s with ChaCha20-Poly1305 and 80 MB/s with
+AES-128-GCM; OpenSSL with AES-NI does about 13 GB/s and 3 GB/s. For a
+client pulling large image layers over TLS, the cipher can be what
+limits throughput.
+
+A server that honours the client's order (OpenSSL by default, and so
+does this crate's server, which prefers ChaCha20-Poly1305 itself) will
+choose ChaCha20-Poly1305. A server that applies its own order, as Go
+does with hardware AES, still chooses AES-GCM; the client then runs at
+the slower rate, and that is correct and secure, only not fast.
+
+Both ciphers stay offered. Nothing changes for security: both are
+AEADs with 256-bit or 128-bit keys, and both are constant time here.

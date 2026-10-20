@@ -706,3 +706,12 @@ fn groups_can_be_chosen_among_the_supported_ones() {
     let (c, _) = connect(p.client, p.server);
     assert_eq!(c.key_exchange_group(), Some(group::SECP384R1));
 }
+
+#[test]
+fn the_client_asks_for_chacha20_first() {
+    let p = pair();
+    let mut c = ClientConnection::new(Arc::new(p.client), "example.test").unwrap();
+    let wire = c.take_tls();
+    let ch = super::msgs::ClientHello::parse(&wire[9..]).unwrap();
+    assert_eq!(ch.cipher_suites[0], 0x1303);
+}

@@ -975,6 +975,13 @@ MUTANTS = [
         "    if false {\n        let mut ext",
         UNIT, "round_trip_and_a_forged_request", [],
     ),
+    (
+        "client: AES-GCM offered first",
+        "src/tls/config.rs",
+        "            // the faster cipher.\n            suites: vec![\n                suites::TLS_CHACHA20_POLY1305_SHA256,\n",
+        "            // the faster cipher.\n            suites: vec![\n",
+        UNIT, "the_client_asks_for_chacha20_first", [],
+    ),
 ]
 
 

@@ -68,7 +68,11 @@ fn new_key(kind: Kind, dir: &std::path::Path) -> PrivateKey {
 }
 
 fn pki_of(tag: &str, kind: Kind) -> Pki {
-    let dir = std::env::temp_dir().join(format!("quanty-interop-{tag}-{}", std::process::id()));
+    // Unique per call: tests run in parallel and several use the same
+    // tag, and one test reading another's key gives baffling failures.
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("quanty-interop-{tag}-{}-{n}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let t = now();
     let root_key = new_key(kind, &dir);
@@ -242,6 +246,16 @@ fn client_against_s_server_cipher(
         ("TLSv1.3", 0x0304)
     };
     assert!(page.contains(name), "{page}");
+    // s_server follows the client's order, which puts ChaCha20 first
+    // (ADR-031), unless the test forces a suite.
+    if cipher.is_none() {
+        let chacha = if tls12 { 0xcca9 } else { 0x1303 };
+        if matches!(kind, Kind::Rsa) && tls12 {
+            assert_eq!(s.connection().cipher_suite(), Some(0xcca8));
+        } else {
+            assert_eq!(s.connection().cipher_suite(), Some(chacha));
+        }
+    }
     assert_eq!(s.connection().protocol_version(), Some(v));
     // OpenSSL before 3.5 has no ML-KEM and takes the X25519 share.
     let g = s.connection().key_exchange_group().unwrap();
