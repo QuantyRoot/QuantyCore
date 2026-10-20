@@ -14,6 +14,7 @@ through and add a new entry, never silently edit history.
 - [ADR-007](#adr-007-gzip-and-tar-stream-with-fixed-memory-and-accept-what-zlib-accepts) gzip and tar stream with fixed memory, and accept what zlib accepts
 - [ADR-008](#adr-008-json-is-strict-and-one-document-has-one-meaning) JSON is strict, and one document has one meaning
 - [ADR-009](#adr-009-http11-for-registries-with-one-reading-of-every-response) HTTP/1.1 for registries, with one reading of every response
+- [ADR-020](#adr-020-tls-scope-widened-to-a-complete-implementation) TLS scope widened to a complete implementation
 
 ## ADR-001: Nothing outside the standard library, and QuantyRoot is not outside
 
@@ -351,3 +352,68 @@ shown to fail its test when broken on purpose.
 **The cost:** a registry or proxy that sends bare LF line endings,
 folded headers or any transfer coding but chunked cannot be pulled from
 until this record is revisited.
+
+## ADR-020: TLS scope widened to a complete implementation
+
+Supersedes the **Scope** section of ADR-003. Everything else in ADR-003
+stays in force: why TLS is written here, the rules for writing it, the
+measuring instruments, and the condition under which it may be called
+secure. Until that condition is met, every public text calls it
+unreviewed.
+
+ADR-003 kept the scope narrow and said it would widen only when a real
+peer needed more. Planning the consumers through showed that every item it
+deferred already has such a peer, so the scope is set once, in full,
+instead of being reopened item by item:
+
+- TLS 1.2 (RFC 5246): container registries, corporate proxies and
+  middleboxes that still terminate 1.2. Only ECDHE key exchange with AEAD
+  suites, and Extended Master Secret (RFC 7627) is required of the peer.
+- Session resumption with PSK: the image puller opens many short
+  connections to the same registry.
+- Server side as well as client side: QuantyKube serves etcd's gRPC API
+  with mutual TLS, and the QuantyDB server will serve TLS.
+- ChaCha20-Poly1305 and AES-256-GCM next to AES-128-GCM, P-384, Ed25519,
+  and RSA PSS signing from 2048 to 4096 bits: these are what certificates
+  and peers in the wild actually use, and a client that cannot verify a
+  P-384 intermediate cannot talk to a public registry.
+- Loading the system trust store from PEM files, for the same registries.
+- Name Constraints, Extended Key Usage, and SAN matching for DNS and IP
+  with wildcards (RFC 6125).
+- Generating keys, certificates and CSRs, because QuantyKube issues its
+  own cluster certificates.
+- X25519MLKEM768 with ML-KEM-768 (FIPS 203), last, because Go offers it by
+  default and traffic recorded today is decrypted by the first large
+  quantum computer.
+
+**Not built, and why.**
+
+- 0-RTT data: it is replayable by design (RFC 8446 section 8), and every
+  application on top would have to prove its first flight idempotent.
+- Renegotiation: the source of the triple handshake and renegotiation
+  injection attacks; TLS 1.3 removed it.
+- SSL 3.0, TLS 1.0 and 1.1, CBC suites, RC4, 3DES, static RSA key
+  exchange: each is broken or lacks forward secrecy, and no peer we target
+  requires one.
+- Compression: CRIME.
+- DTLS: no consumer uses datagrams.
+- QUIC is not part of this work, but the handshake is kept apart from the
+  record layer, handshake messages in and out plus the secrets per
+  epoch, so a QUIC transport can drive it later without a rewrite.
+
+**Shape.** A sans-IO state machine that takes bytes in and gives bytes
+out, with a thin blocking wrapper over `Read + Write`, so it runs under
+QuantyDB's own reactor as well as over a `TcpStream`. Configuration is
+safe by default: TLS 1.3 only, hostname verification on. There are no
+switches that turn verification off; a caller who must trust one
+specific certificate configures it as a root.
+
+**What it costs.** ADR-003 estimated eight to fifteen thousand lines. With
+TLS 1.2, a server, P-384, Ed25519, RSA signing, certificate issuance and
+ML-KEM it is closer to twenty thousand, and the attack surface grows with
+every one of them. TLS 1.2 in particular brings back a second key schedule
+and a second state machine that has to be kept as strict as the first.
+
+**Rejected:** keeping the narrow scope and widening per peer. Each
+widening would have touched the handshake again, and a handshake
+reopened five times is reviewed five times or not at all.

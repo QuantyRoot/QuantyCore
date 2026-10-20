@@ -65,3 +65,43 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.89
       - run: cargo test --workspace --locked
+
+  # NIST ACVP and Wycheproof at pinned commits. Bumping a pin is its own
+  # commit, so a changed vector never arrives together with changed code.
+  tls-vectors:
+    name: TLS primitives against NIST ACVP and Wycheproof
+    runs-on: ubuntu-latest
+    env:
+      ACVP_COMMIT: 975de31eb83d87039ec88934fdc47d8c312b892d
+      WYCHEPROOF_COMMIT: 7a325932231bd7a724c791c8b0d65ea4d6d2f435
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.0
+      - name: fetch the vector suites
+        run: tests/tls_fetch_vectors.sh "$RUNNER_TEMP"
+      - name: every vector, including the 1 to 8 GiB messages
+        run: cargo test --release --test tls_vectors -- --nocapture
+        env:
+          QUANTY_VECTORS_REQUIRED: 1
+          QUANTY_ACVP: ${{ runner.temp }}/acvp/gen-val/json-files
+          QUANTY_WYCHEPROOF: ${{ runner.temp }}/wycheproof/testvectors_v1
+          QUANTY_ACVP_LDT: 1
+
+  tls-mutants:
+    name: TLS tests fail on deliberately broken code
+    runs-on: ubuntu-latest
+    env:
+      ACVP_COMMIT: 975de31eb83d87039ec88934fdc47d8c312b892d
+      WYCHEPROOF_COMMIT: 7a325932231bd7a724c791c8b0d65ea4d6d2f435
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.0
+      - name: fetch the vector suites
+        run: tests/tls_fetch_vectors.sh "$RUNNER_TEMP"
+      - name: every mutant must be killed by its test
+        run: tests/tls_mutants.py
+        env:
+          QUANTY_VECTORS_REQUIRED: 1
+          QUANTY_ACVP: ${{ runner.temp }}/acvp/gen-val/json-files
+          QUANTY_WYCHEPROOF: ${{ runner.temp }}/wycheproof/testvectors_v1
+          QUANTY_ACVP_LDT: 1

@@ -11,3 +11,4 @@ pub mod inflate;
 pub mod json;
 pub mod proto;
 pub mod tar;
+pub mod tls;

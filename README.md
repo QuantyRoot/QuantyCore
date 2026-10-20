@@ -21,7 +21,7 @@ on the Rust standard library.
 | tar: ustar, GNU, PAX, streaming | built, tested |
 | JSON, strict RFC 8259 | built, tested |
 | HTTP/1.1 client for registries, blocking | built, tested |
-| TLS 1.3 | planned, see below |
+| TLS: SHA-2, HMAC, HKDF | built, tested, unreviewed; handshake planned |
 
 Planned means no code exists yet.
 
