@@ -7,6 +7,7 @@ use super::build::{self, SanEntry};
 use super::cert::{general_names, oid, parse_spki, GeneralName, Spki};
 use super::der::{self, tag, Der, DerError};
 use super::keys::PrivateKey;
+use super::name::valid_dns;
 use crate::tls::auth::PublicKey;
 
 /// pkcs-9-at-extensionRequest (RFC 2985 5.4.2).
@@ -71,7 +72,8 @@ impl CertificateRequest {
         let attrs = i.expect(tag::context_constructed(0))?;
         i.end()?;
 
-        let mut san = Vec::new();
+        let mut san = None;
+        let mut seen_request = false;
         let mut a = Der::new(attrs);
         while !a.is_empty() {
             let mut attr = a.sequence()?;
@@ -81,6 +83,10 @@ impl CertificateRequest {
             if id != EXTENSION_REQUEST {
                 continue;
             }
+            if seen_request {
+                return Err(DerError("extensionRequest twice"));
+            }
+            seen_request = true;
             let mut exts = values.sequence()?;
             values.end()?;
             while !exts.is_empty() {
@@ -94,12 +100,19 @@ impl CertificateRequest {
                 if eid != oid::SUBJECT_ALT_NAME {
                     continue;
                 }
+                if san.is_some() {
+                    return Err(DerError("subjectAltName twice"));
+                }
                 let mut v = Der::new(value);
                 let names = general_names(v.sequence()?)?;
                 v.end()?;
+                let list: &mut Vec<SanEntry> = san.insert(Vec::new());
                 for n in names {
-                    san.push(match n {
-                        GeneralName::Dns(d) => SanEntry::Dns(d),
+                    list.push(match n {
+                        // A wildcard is a valid request; whether to grant
+                        // it is the CA's decision.
+                        GeneralName::Dns(d) if valid_dns(&d, true) => SanEntry::Dns(d),
+                        GeneralName::Dns(_) => return Err(DerError("invalid dNSName")),
                         GeneralName::Ip(ip) => SanEntry::Ip(ip_of(&ip)?),
                         _ => return Err(DerError("subjectAltName kind not supported")),
                     });
@@ -113,8 +126,13 @@ impl CertificateRequest {
         Ok(CertificateRequest {
             subject: subject.to_vec(),
             spki,
-            san,
+            san: san.unwrap_or_default(),
         })
+    }
+
+    /// The common name of the subject, if it has one.
+    pub fn common_name(&self) -> Option<String> {
+        super::cert::name_cn(&self.subject)
     }
 }
 
@@ -148,6 +166,7 @@ mod tests {
             assert_eq!(r.san, san);
             assert_eq!(r.spki.der, key.public_spki());
             assert_eq!(r.subject, build::name("node-1"));
+            assert_eq!(r.common_name().as_deref(), Some("node-1"));
 
             // Any changed byte of the request info breaks the signature
             // or the encoding.
@@ -173,5 +192,17 @@ mod tests {
             let spliced = der::wrap(tag::SEQUENCE, &body);
             assert!(CertificateRequest::parse(&spliced).is_err());
         }
+    }
+
+    #[test]
+    fn requests_with_bad_names_are_refused() {
+        let key = PrivateKey::generate_ed25519().unwrap();
+        let wildcard = request("w", &[SanEntry::Dns("*.cluster.test".into())], &key);
+        assert_eq!(
+            CertificateRequest::parse(&wildcard).unwrap().san,
+            vec![SanEntry::Dns("*.cluster.test".into())]
+        );
+        let bad = request("b", &[SanEntry::Dns("bad name.test".into())], &key);
+        assert!(CertificateRequest::parse(&bad).is_err());
     }
 }

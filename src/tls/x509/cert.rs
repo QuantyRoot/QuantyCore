@@ -303,25 +303,30 @@ impl Certificate {
     /// The common name of the subject, for messages only; names are
     /// matched against subjectAltName alone.
     pub fn subject_cn(&self) -> Option<String> {
-        let mut d = Der::new(&self.subject);
-        let mut name = d.sequence().ok()?;
-        while !name.is_empty() {
-            let mut set = Der::new(name.expect(tag::SET).ok()?);
-            while !set.is_empty() {
-                let mut atv = set.sequence().ok()?;
-                let id = atv.oid().ok()?;
-                let (_, v, _) = atv.read().ok()?;
-                if id == oid::COMMON_NAME {
-                    return String::from_utf8(v.to_vec()).ok();
-                }
-            }
-        }
-        None
+        name_cn(&self.subject)
     }
 
     pub fn is_self_issued(&self) -> bool {
         self.issuer == self.subject
     }
+}
+
+/// The first common name in a Name.
+pub(crate) fn name_cn(name_der: &[u8]) -> Option<String> {
+    let mut d = Der::new(name_der);
+    let mut name = d.sequence().ok()?;
+    while !name.is_empty() {
+        let mut set = Der::new(name.expect(tag::SET).ok()?);
+        while !set.is_empty() {
+            let mut atv = set.sequence().ok()?;
+            let id = atv.oid().ok()?;
+            let (_, v, _) = atv.read().ok()?;
+            if id == oid::COMMON_NAME {
+                return String::from_utf8(v.to_vec()).ok();
+            }
+        }
+    }
+    None
 }
 
 pub(crate) fn parse_spki(der: &[u8]) -> R<Spki> {

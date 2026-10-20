@@ -56,6 +56,12 @@ pub(super) fn server_hello(
                     return Err(Error::handshake_failure("renegotiation_info"));
                 }
             }
+            ext::SERVER_NAME if !offer.extensions.contains(&ext::SERVER_NAME) => {
+                return Err(Error::new(
+                    alert::UNSUPPORTED_EXTENSION,
+                    "extension not offered",
+                ))
+            }
             ext::EXTENDED_MASTER_SECRET | ext::SERVER_NAME => {
                 if !e.data.is_empty() {
                     return Err(Error::decode("extension in ServerHello"));

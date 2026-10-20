@@ -799,7 +799,9 @@ Only the extensionRequest attribute is read, and from it only
 subjectAltName with DNS names and IP addresses; anything else a request
 asks for is ignored, since the CA decides what goes into the
 certificate. A name kind other than those two fails the request rather
-than being dropped silently.
+than being dropped silently, and so do a DNS name that is not a valid
+host name and a repeated extensionRequest or subjectAltName. A wildcard
+is a valid request; whether to grant it is the CA's decision.
 
 **Checked by:** OpenSSL verifying requests written here (Ed25519, P-256,
 RSA) and showing their names; requests written by OpenSSL (Ed25519,
