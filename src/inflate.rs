@@ -749,8 +749,8 @@ impl Inflate {
 fn crc32_update(crc: u32, data: &[u8]) -> u32 {
     let t = &CRC_TABLES;
     let mut c = !crc;
-    let mut chunks = data.chunks_exact(8);
-    for ch in &mut chunks {
+    let (chunks, rest) = data.as_chunks::<8>();
+    for ch in chunks {
         let lo = u32::from_le_bytes([ch[0], ch[1], ch[2], ch[3]]) ^ c;
         let hi = u32::from_le_bytes([ch[4], ch[5], ch[6], ch[7]]);
         c = t[7][(lo & 0xff) as usize]
@@ -762,7 +762,7 @@ fn crc32_update(crc: u32, data: &[u8]) -> u32 {
             ^ t[1][((hi >> 16) & 0xff) as usize]
             ^ t[0][(hi >> 24) as usize];
     }
-    for &b in chunks.remainder() {
+    for &b in rest {
         c = t[0][((c ^ u32::from(b)) & 0xff) as usize] ^ (c >> 8);
     }
     !c
