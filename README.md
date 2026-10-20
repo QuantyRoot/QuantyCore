@@ -14,7 +14,7 @@ on the Rust standard library.
 | Part | State |
 | --- | --- |
 | Protobuf wire format: varints, field keys | built, tested |
-| HPACK | planned |
+| HPACK: decoder with dynamic table, stateless encoder | built, tested |
 | HTTP/2 framing | planned |
 | gRPC | planned |
 | TLS 1.3 | planned, see below |

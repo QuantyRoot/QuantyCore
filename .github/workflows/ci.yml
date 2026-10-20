@@ -29,6 +29,21 @@ jobs:
       - name: tests
         run: cargo test --workspace
 
+  hpack-corpus:
+    name: HPACK against 14 recorded encoders
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.0
+      - name: fetch the corpus at a pinned commit
+        run: |
+          git clone --quiet https://github.com/http2jp/hpack-test-case "$RUNNER_TEMP/hpack-test-case"
+          git -C "$RUNNER_TEMP/hpack-test-case" checkout --quiet 8a1406e7d14bfcb6c046021f13cc15cfb162726d
+      - name: decode every story
+        run: cargo test --release --test hpack_corpus -- --nocapture
+        env:
+          QUANTY_HPACK_CASES: ${{ runner.temp }}/hpack-test-case
+
   msrv:
     name: test on MSRV (1.89)
     runs-on: ubuntu-latest
