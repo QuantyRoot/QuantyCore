@@ -1,20 +1,12 @@
-//! HPACK against the hpack-test-case corpus.
+//! The hpack-test-case corpus (github.com/http2jp/hpack-test-case, MIT):
+//! the same recorded headers as encoded by nghttp2, Go, Python, Node,
+//! Swift and Haskell implementations, with and without Huffman and the
+//! dynamic table. Too large to vendor at 66 MB, so it runs when
+//! QUANTY_HPACK_CASES points at a checkout; CI pins a commit.
 //!
-//! The corpus (github.com/http2jp/hpack-test-case, MIT licensed) holds the
-//! same recorded header sequences encoded by a dozen independent HPACK
-//! implementations: nghttp2, Go, Haskell, Python, Node, Swift, with and
-//! without Huffman, with and without the dynamic table, with table size
-//! changes. Decoding all of them is the strongest check available that this
-//! decoder agrees with the rest of the world, not just with itself.
-//!
-//! It is 66 MB, so it is not copied in here. Point QUANTY_HPACK_CASES at a
-//! checkout and the test runs it; CI does that at a pinned commit. Without
-//! the variable the test says so and passes, so local runs stay fast.
-//!
-//! What it does not catch: an entry overhead of 31 bytes instead of 32
-//! still decodes every story, because the recorded encoders rarely fill
-//! the table right up to an eviction boundary. The unit tests in
-//! `src/hpack.rs` pin that number; this file is not the only guard.
+//! It does not catch a 31 byte entry overhead instead of 32, because the
+//! recorded encoders rarely fill the table to an eviction boundary. The
+//! unit tests pin that number.
 
 use quantycore::hpack::{encode, Decoder};
 use std::path::Path;
@@ -34,7 +26,7 @@ fn every_story_in_the_corpus_decodes() {
         .collect();
     entries.sort();
     for dir in entries {
-        // raw-data holds the headers without any encoding.
+        // raw-data has the headers but no encoding of them
         let encoded = dir.file_name().unwrap() != "raw-data";
         if encoded {
             implementations += 1;
@@ -58,7 +50,6 @@ fn run_story(path: &Path, encoded: bool) -> usize {
     let text = std::fs::read_to_string(path).unwrap();
     let doc = Json::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     let list = doc.get("cases").and_then(Json::as_array).expect("cases");
-    // The decoder must allow any size the encoder switched to.
     let limit = list
         .iter()
         .filter_map(|c| c.get("header_table_size").and_then(Json::as_u64))
@@ -90,7 +81,6 @@ fn run_story(path: &Path, encoded: bool) -> usize {
             let got: Vec<_> = got.into_iter().map(|h| (h.name, h.value)).collect();
             assert_eq!(got, expected, "{}", at());
         }
-        // Our own encoder, through a fresh decoder, must give the same list.
         let input: Vec<(&[u8], &[u8], bool)> = expected
             .iter()
             .map(|(n, v)| (n.as_slice(), v.as_slice(), false))
@@ -118,7 +108,7 @@ fn hex(s: &[u8]) -> Vec<u8> {
         .collect()
 }
 
-/// Just enough JSON for the corpus files. Test code only.
+/// Just enough JSON for the corpus files.
 enum Json {
     Null,
     Bool,

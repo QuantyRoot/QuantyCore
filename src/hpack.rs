@@ -1,39 +1,25 @@
 //! HPACK, the header compression of HTTP/2 (RFC 7541).
 //!
-//! Three pieces: prefixed integers, string literals that may be Huffman
-//! coded, and a decoder that keeps the dynamic table the peer's encoder
-//! fills. The encoder here is deliberately simple: it uses the static table
-//! and literals, and never inserts into the dynamic table. That is valid
-//! HPACK, needs no state, and costs some bytes on repeated headers, which
-//! is the right trade until a measurement says otherwise.
+//! The encoder never inserts into the dynamic table. That is valid HPACK,
+//! keeps the encoder stateless, and costs a few bytes on repeated headers.
 //!
-//! The Huffman code in RFC 7541 Appendix B is canonical: ordering the
-//! symbols by code length, then by symbol, and counting upward produces
-//! exactly the published codes. So only the 257 lengths are stored here and
-//! the codes are derived from them. A test checks that the lengths form a
-//! complete code and that known codes from the RFC come out right.
+//! The Huffman code of Appendix B is canonical: sorting symbols by code
+//! length, then by value, and counting upward reproduces the published
+//! codes. So only the 257 lengths are stored and the codes are derived.
 
 use std::collections::VecDeque;
 
-/// Why a header block could not be decoded. Every one of these is a
-/// COMPRESSION_ERROR at the HTTP/2 level, which ends the connection.
+/// Every one of these is a COMPRESSION_ERROR in HTTP/2 and ends the
+/// connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HpackError {
-    /// The block ended in the middle of a representation.
     Truncated,
-    /// An integer does not fit the range this decoder accepts.
     IntegerOverflow,
-    /// Index 0, or an index past the end of both tables.
     BadIndex(usize),
-    /// A Huffman string contained the EOS symbol.
     HuffmanEos,
-    /// Huffman padding longer than seven bits, or not all ones.
     HuffmanPadding,
-    /// A table size update above the limit this side advertised.
     TableSizeTooLarge(usize),
-    /// A table size update after the first header field of a block.
     LateTableSizeUpdate,
-    /// The decoded header list is larger than the caller allowed.
     HeaderListTooLarge,
 }
 
@@ -54,13 +40,11 @@ impl std::fmt::Display for HpackError {
 
 impl std::error::Error for HpackError {}
 
-/// The largest integer this decoder accepts. Header names, values, indices
-/// and table sizes all fit far below it; anything above is an attack or a
-/// bug, and rejecting it keeps every later addition free of overflow.
+/// Every legitimate length, index and table size fits far below this, and
+/// capping here keeps all later arithmetic free of overflow.
 pub const MAX_INTEGER: u64 = u32::MAX as u64;
 
-/// Appends `value` with an `n` bit prefix (1 to 8). `flags` holds the bits
-/// above the prefix in the first byte and must not overlap it.
+/// `flags` holds the bits above the `n` bit prefix in the first byte.
 pub fn encode_integer(value: u64, n: u8, flags: u8, out: &mut Vec<u8>) {
     debug_assert!((1..=8).contains(&n));
     let max = (1u64 << n) - 1;
@@ -78,9 +62,6 @@ pub fn encode_integer(value: u64, n: u8, flags: u8, out: &mut Vec<u8>) {
     out.push(rest as u8);
 }
 
-/// Reads an integer with an `n` bit prefix from the front of `input`.
-/// Returns the value and the bytes consumed. The bits above the prefix in
-/// the first byte are ignored; the caller has already looked at them.
 pub fn decode_integer(input: &[u8], n: u8) -> Result<(u64, usize), HpackError> {
     debug_assert!((1..=8).contains(&n));
     let max = (1u64 << n) - 1;
@@ -91,8 +72,7 @@ pub fn decode_integer(input: &[u8], n: u8) -> Result<(u64, usize), HpackError> {
     }
     let mut shift = 0u32;
     for (i, &byte) in input[1..].iter().enumerate() {
-        // Five continuation bytes carry 35 bits, more than MAX_INTEGER
-        // needs. A sixth can only mean overflow or pointless padding.
+        // a sixth continuation byte is either overflow or endless padding
         if shift > 28 {
             return Err(HpackError::IntegerOverflow);
         }
@@ -108,9 +88,7 @@ pub fn decode_integer(input: &[u8], n: u8) -> Result<(u64, usize), HpackError> {
     Err(HpackError::Truncated)
 }
 
-// ---------------------------------------------------------------- Huffman
-
-/// Code lengths for symbols 0 to 255 and EOS (256), from RFC 7541 Appendix B.
+/// RFC 7541 Appendix B, symbols 0 to 255 and EOS.
 #[rustfmt::skip]
 const HUFFMAN_LENGTHS: [u8; 257] = [
     13, 23, 28, 28, 28, 28, 28, 28, 28, 24, 30, 28, 28, 30, 28, 28,
@@ -135,17 +113,12 @@ const HUFFMAN_LENGTHS: [u8; 257] = [
 const EOS: u16 = 256;
 const MAX_CODE_LEN: usize = 30;
 
-/// The canonical code, derived once at compile time from the lengths.
 struct Canonical {
-    /// The code of each symbol, right aligned.
     codes: [u32; 257],
-    /// How many symbols have each length.
     count: [u32; MAX_CODE_LEN + 1],
-    /// The first (smallest) code of each length.
     first: [u32; MAX_CODE_LEN + 1],
-    /// Where each length starts in `symbols`.
     offset: [usize; MAX_CODE_LEN + 1],
-    /// Symbols ordered by length, then by value.
+    /// ordered by length, then by value
     symbols: [u16; 257],
 }
 
@@ -194,7 +167,6 @@ const fn build_canonical() -> Canonical {
     }
 }
 
-/// The length in bytes of `input` once Huffman coded.
 pub fn huffman_encoded_len(input: &[u8]) -> usize {
     let bits: usize = input
         .iter()
@@ -203,7 +175,6 @@ pub fn huffman_encoded_len(input: &[u8]) -> usize {
     bits.div_ceil(8)
 }
 
-/// Appends `input` Huffman coded, padded with ones to a whole byte.
 pub fn huffman_encode(input: &[u8], out: &mut Vec<u8>) {
     let mut acc: u64 = 0;
     let mut bits: u32 = 0;
@@ -215,7 +186,6 @@ pub fn huffman_encode(input: &[u8], out: &mut Vec<u8>) {
             bits -= 8;
             out.push((acc >> bits) as u8);
         }
-        // At most 7 bits remain; drop what has been written.
         acc &= (1 << bits) - 1;
     }
     if bits > 0 {
@@ -224,7 +194,6 @@ pub fn huffman_encode(input: &[u8], out: &mut Vec<u8>) {
     }
 }
 
-/// Decodes a Huffman coded string.
 pub fn huffman_decode(input: &[u8]) -> Result<Vec<u8>, HpackError> {
     let mut out = Vec::with_capacity(input.len() * 8 / 5);
     let mut code: u32 = 0;
@@ -243,21 +212,18 @@ pub fn huffman_decode(input: &[u8]) -> Result<Vec<u8>, HpackError> {
                 code = 0;
                 len = 0;
             } else if len == MAX_CODE_LEN {
-                // Cannot happen with a complete code, which a test proves
-                // this one is: some code of at most 30 bits always matches.
-                // Kept so a broken table fails here and not out of bounds.
+                // unreachable with a complete code; a broken table should
+                // fail here rather than index out of bounds
                 return Err(HpackError::HuffmanEos);
             }
         }
     }
-    // What is left must be a prefix of EOS: at most seven bits, all ones.
+    // the rest must be a prefix of EOS: at most seven bits, all ones
     if len > 7 || code != (1 << len) - 1 {
         return Err(HpackError::HuffmanPadding);
     }
     Ok(out)
 }
-
-// ------------------------------------------------------------ The tables
 
 /// RFC 7541 Appendix A. Index 1 is the first entry.
 #[rustfmt::skip]
@@ -325,37 +291,30 @@ const STATIC_TABLE: [(&[u8], &[u8]); 61] = [
     (b"www-authenticate", b""),
 ];
 
-/// RFC 7541 section 4.1: every entry costs its name, its value and 32.
+/// RFC 7541 section 4.1.
 const ENTRY_OVERHEAD: usize = 32;
 
-/// One decoded header field.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Header {
     pub name: Vec<u8>,
     pub value: Vec<u8>,
-    /// Sent as "never indexed": an intermediary must not compress it
-    /// either. Typically set on credentials.
+    /// "Never indexed": intermediaries must not compress it either.
     pub sensitive: bool,
 }
 
-/// Decodes header blocks from one peer, keeping the dynamic table its
-/// encoder fills. One per connection and direction.
+/// One per connection and direction.
 pub struct Decoder {
     table: VecDeque<(Vec<u8>, Vec<u8>)>,
     size: usize,
-    /// The current maximum, as set by the peer's size updates.
+    /// set by the peer's size updates
     max_size: usize,
-    /// The ceiling this side advertised in SETTINGS_HEADER_TABLE_SIZE.
+    /// what this side advertised in SETTINGS_HEADER_TABLE_SIZE
     limit: usize,
-    /// Largest header list accepted, counted as RFC 7540 counts
-    /// SETTINGS_MAX_HEADER_LIST_SIZE.
+    /// counted the way RFC 7540 counts SETTINGS_MAX_HEADER_LIST_SIZE
     max_list_size: usize,
 }
 
 impl Decoder {
-    /// `table_size` is the SETTINGS_HEADER_TABLE_SIZE this side advertises
-    /// (4096 by default in HTTP/2). `max_list_size` bounds the memory one
-    /// header block may cost.
     pub fn new(table_size: usize, max_list_size: usize) -> Self {
         Decoder {
             table: VecDeque::new(),
@@ -366,12 +325,10 @@ impl Decoder {
         }
     }
 
-    /// The dynamic table's current size in RFC 7541 units.
     pub fn table_size(&self) -> usize {
         self.size
     }
 
-    /// The number of entries in the dynamic table.
     pub fn table_len(&self) -> usize {
         self.table.len()
     }
@@ -398,8 +355,7 @@ impl Decoder {
     fn insert(&mut self, name: Vec<u8>, value: Vec<u8>) {
         let cost = name.len() + value.len() + ENTRY_OVERHEAD;
         if cost > self.max_size {
-            // Section 4.4: an entry larger than the table empties it and
-            // is not added. Not an error.
+            // section 4.4: not an error, the table just ends up empty
             self.table.clear();
             self.size = 0;
             return;
@@ -409,8 +365,8 @@ impl Decoder {
         self.table.push_front((name, value));
     }
 
-    /// Decodes one complete header block (the HEADERS frame and any
-    /// CONTINUATION frames joined).
+    /// `block` is a HEADERS frame's fragment joined with its CONTINUATION
+    /// frames.
     pub fn decode(&mut self, block: &[u8]) -> Result<Vec<Header>, HpackError> {
         let mut out = Vec::new();
         let mut list_size = 0usize;
@@ -419,7 +375,6 @@ impl Decoder {
             let b = block[pos];
             let rest = &block[pos..];
             if b & 0x80 != 0 {
-                // Indexed header field.
                 let (index, used) = decode_integer(rest, 7)?;
                 pos += used;
                 let (n, v) = self.entry(index as usize)?;
@@ -429,7 +384,6 @@ impl Decoder {
                     sensitive: false,
                 });
             } else if b & 0x20 != 0 && b & 0x40 == 0 {
-                // Dynamic table size update.
                 if !out.is_empty() {
                     return Err(HpackError::LateTableSizeUpdate);
                 }
@@ -443,9 +397,8 @@ impl Decoder {
                 self.evict_to(size);
                 continue;
             } else {
-                // A literal: with incremental indexing (01, 6 bit index),
-                // without indexing (0000) or never indexed (0001), the
-                // latter two with a 4 bit index.
+                // literal: 01 adds to the table, 0000 does not, 0001 is
+                // never indexed
                 let indexing = b & 0x40 != 0;
                 let prefix = if indexing { 6 } else { 4 };
                 let (index, used) = decode_integer(rest, prefix)?;
@@ -502,12 +455,7 @@ fn encode_string(s: &[u8], out: &mut Vec<u8>) {
     }
 }
 
-/// Encodes a header block without touching the dynamic table.
-///
-/// Exact static table matches become one byte. Everything else is a
-/// literal, never indexed when `sensitive` is set and without indexing
-/// otherwise, using a static table name where there is one. Names must
-/// already be lowercase, as HTTP/2 requires.
+/// Names must already be lowercase, as HTTP/2 requires.
 pub fn encode(headers: &[(&[u8], &[u8], bool)], out: &mut Vec<u8>) {
     for &(name, value, sensitive) in headers {
         debug_assert!(
@@ -607,7 +555,6 @@ mod tests {
         let mut out = Vec::new();
         encode_integer(MAX_INTEGER + 1, 5, 0, &mut out);
         assert_eq!(decode_integer(&out, 5), Err(HpackError::IntegerOverflow));
-        // Zero padding continuation bytes forever is still too long.
         assert_eq!(
             decode_integer(&[0x1f, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00], 5),
             Err(HpackError::IntegerOverflow)
@@ -618,13 +565,12 @@ mod tests {
 
     #[test]
     fn the_lengths_form_a_complete_canonical_code() {
-        // Kraft: the code uses up the whole space, no gaps, no overlap.
+        // Kraft equality: complete, no overlap
         let total: u64 = HUFFMAN_LENGTHS
             .iter()
             .map(|&l| 1u64 << (MAX_CODE_LEN - l as usize))
             .sum();
         assert_eq!(total, 1 << MAX_CODE_LEN);
-        // Codes listed in RFC 7541 Appendix B.
         let code = |s: usize| (HUFFMAN.codes[s], HUFFMAN_LENGTHS[s]);
         assert_eq!(code(b'0' as usize), (0x0, 5));
         assert_eq!(code(b'a' as usize), (0x3, 5));
@@ -659,17 +605,14 @@ mod tests {
 
     #[test]
     fn bad_huffman_input_is_rejected() {
-        // EOS spelled out in full, then padding.
         assert_eq!(
             huffman_decode(&[0xff, 0xff, 0xff, 0xff]),
             Err(HpackError::HuffmanEos)
         );
-        // Eight bits of padding.
         let mut out = Vec::new();
-        huffman_encode(b"a", &mut out); // 00011 + 111
+        huffman_encode(b"a", &mut out);
         out.push(0xff);
         assert_eq!(huffman_decode(&out), Err(HpackError::HuffmanPadding));
-        // Padding that is not all ones: "a" then 000.
         assert_eq!(
             huffman_decode(&[0b0001_1000]),
             Err(HpackError::HuffmanPadding)
@@ -765,7 +708,6 @@ mod tests {
         d.decode(&block).unwrap();
         assert_eq!(d.table_len(), 2);
         assert_eq!(d.table_size(), 100);
-        // Index 62 is the newest entry, 63 the one before; the first is gone.
         let h = d.decode(&[0x80 | 62, 0x80 | 63]).unwrap();
         assert_eq!(h[0].name, b"name-2xxx");
         assert_eq!(h[1].name, b"name-1xxx");
@@ -794,14 +736,11 @@ mod tests {
             "400a 6375 7374 6f6d 2d6b 6579 0d63 7573 746f 6d2d 6865 6164 6572",
         ))
         .unwrap();
-        // Shrinking to 0 evicts everything.
         d.decode(&[0x20]).unwrap();
         assert_eq!(d.table_len(), 0);
-        // Above the advertised limit.
         let mut big = Vec::new();
         encode_integer(4097, 5, 0x20, &mut big);
         assert_eq!(d.decode(&big), Err(HpackError::TableSizeTooLarge(4097)));
-        // After a field.
         assert_eq!(
             d.decode(&[0x82, 0x20]),
             Err(HpackError::LateTableSizeUpdate)
@@ -813,7 +752,6 @@ mod tests {
         let mut d = Decoder::new(4096, 1 << 16);
         assert_eq!(d.decode(&[0x80]), Err(HpackError::BadIndex(0)));
         assert_eq!(d.decode(&[0x80 | 62]), Err(HpackError::BadIndex(62)));
-        // Literal whose value claims more bytes than there are.
         assert_eq!(d.decode(&[0x04, 0x05, b'a']), Err(HpackError::Truncated));
         assert_eq!(d.decode(&[0x40]), Err(HpackError::Truncated));
     }
@@ -841,7 +779,6 @@ mod tests {
         ];
         let mut block = Vec::new();
         encode(&input, &mut block);
-        // ":status: 200" is one byte, static index 8.
         assert_eq!(block[0], 0x88);
         let mut d = Decoder::new(4096, 1 << 16);
         let out = d.decode(&block).unwrap();
@@ -852,13 +789,11 @@ mod tests {
                 (n, v, s)
             );
         }
-        // The encoder never fills the peer's table.
         assert_eq!(d.table_len(), 0);
     }
 
     #[test]
     fn random_strings_round_trip() {
-        // xorshift, seeded, so a failure reproduces.
         let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
         let mut next = move || {
             x ^= x << 13;
