@@ -28,6 +28,9 @@ pub mod code {
 /// leaves room without letting one call claim unbounded memory.
 pub const MAX_MESSAGE: usize = 16 << 20;
 
+/// Threads for unary calls on one listener.
+pub const UNARY_THREADS: usize = 64;
+
 /// A streaming sender blocks once this much is waiting on flow control, so
 /// a client that stops reading cannot make the server buffer forever.
 const MAX_QUEUED: usize = 4 << 20;
@@ -535,7 +538,9 @@ pub fn serve_unix(
     listener: std::os::unix::net::UnixListener,
     service: Arc<dyn Service>,
 ) -> std::io::Result<()> {
-    let pool = Pool::new(std::thread::available_parallelism().map_or(4, |n| n.get() * 2));
+    // unary calls mostly wait on the disk, not the CPU, and a group commit
+    // can only be as large as the number of writes in flight
+    let pool = Pool::new(UNARY_THREADS);
     for socket in listener.incoming() {
         let socket = socket?;
         let (service, pool) = (service.clone(), pool.clone());
