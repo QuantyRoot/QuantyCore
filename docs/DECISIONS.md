@@ -22,6 +22,7 @@ through and add a new entry, never silently edit history.
 - [ADR-025](#adr-025-x509-measured-against-x509-limbo-and-expired-roots-refused) X.509 measured against x509-limbo, and expired roots refused
 - [ADR-026](#adr-026-rsa-without-crt-and-without-key-generation) RSA without CRT and without key generation
 - [ADR-027](#adr-027-a-fuzzer-of-our-own-structure-aware-and-checked-by-mutants) A fuzzer of our own, structure aware and checked by mutants
+- [ADR-032](#adr-032-apparmor-is-written-here) AppArmor is written here
 
 ## ADR-001: Nothing outside the standard library, and QuantyRoot is not outside
 
@@ -826,3 +827,91 @@ the slower rate, and that is correct and secure, only not fast.
 
 Both ciphers stay offered. Nothing changes for security: both are
 AEADs with 256-bit or 128-bit keys, and both are constant time here.
+
+## ADR-032: AppArmor is written here
+
+QuantyCore gets its own AppArmor stack under `quantycore::apparmor`: a
+parser for the profile language, a compiler from profiles to the
+automata the kernel enforces, the binary policy format, and the loader
+that hands it to the kernel. The first consumer is QuantyKube's node
+runtime, which must start containers under the profile the kubelet asks
+for (`RuntimeDefault`, `Localhost`, `Unconfined`).
+
+**Why here, although AppArmor is not a wire protocol.** ADR-004 put the
+wire protocols here because two parts of QuantyKube need the same stack.
+AppArmor fits the same reasoning one level down: the binary policy is a
+format the kernel reads, versioned and negotiated through the features
+the kernel publishes, and getting it wrong fails silently in the same
+way a protocol does. Keeping it here leaves QuantyKube with no knowledge
+of kernel policy formats; its syscall crate (its ADR-013) stays a thin
+boundary and does not grow a compiler. The pieces are useful without
+Kubernetes as well, for any Quanty server that wants to confine itself.
+Nothing in it needs `unsafe`: securityfs and procfs are files, so ADR-001
+holds without a boundary crate.
+
+**Target.** The language and the behaviour of upstream AppArmor v5.0.2
+(commit 909affc32a13), the newest release when this started, which
+includes everything `apparmor.d(5)` describes for 4.x. The reference is
+`apparmor_parser` built from that same commit: what it accepts is
+accepted here, what it refuses is refused, and what it would load gives
+the same permissions here, path by path. Which rule kinds end up in a
+binary policy is decided by the kernel's feature set, as upstream decides
+it, so a policy for an older kernel leaves out what that kernel cannot
+enforce.
+
+**Not built, and why.**
+
+- The Python tools (`aa-genprof`, `aa-logprof`, `aa-status` and the
+  rest), audit log parsing and profile generation from logs: they help a
+  person write profiles. Nothing a runtime does depends on them.
+- The notification daemon and the listener for `prompt` upcalls. The
+  `prompt` qualifier and profile mode are part of the language and are
+  compiled, so a profile using them means here what it means upstream;
+  answering the upcalls is a desktop feature.
+- The policy cache (`-W`, `/var/cache/apparmor`). A cache is a second copy
+  of the truth that can go stale; container profiles are small and are
+  compiled when they are loaded.
+- zstd compressed policy: the kernel accepts uncompressed policy whatever
+  it supports, and a zstd encoder would be a large piece of code for a
+  smaller upload.
+- `change_hat` and `change_profile` from inside a running process, and
+  the label query interface of libapparmor. The runtime only sets the
+  profile for the next exec. Hats and `change_profile` rules are still
+  parsed and compiled, since profiles use them.
+- A command line tool. The API is a library; tests and CI drive it.
+
+**The API the runtime needs, shaped by QuantyKube's ADR-013.** Between
+the clone and the exec, the runtime's child makes only syscalls on memory
+prepared before the clone. So the exec transition is split: before the
+clone, the parent asks this crate for the bytes to write (`exec
+<profile>`) and which attribute file to use, the stacking one
+`attr/apparmor/exec` or, only when the stacking file is missing and
+AppArmor's module parameter says it is enabled, the old `attr/exec` that
+other security modules share, as libapparmor decides; the child opens and
+writes with its own syscalls. A plain function over `std::fs` does the
+same for callers that are single threaded. Two traps go into that API's
+documentation, because runc fell into both: the kernel lets a task write
+only its own attribute, so a multi threaded caller must use
+`/proc/thread-self`, and the file must be opened on the host's procfs
+before the pivot, never through a `/proc` the container image can
+control (CVE-2019-16884).
+
+**How it is measured,** before the code it measures: upstream's
+`parser/tst` at the same commit (every `simple_tests` case accepted or
+refused as marked, every `equality.sh` pair equal or unequal as marked);
+a differential test that reads `apparmor_parser`'s binary policy back
+into automata and compares them with ours through the product automaton;
+the profiles shipped by upstream, Ubuntu, Debian, Docker and containerd
+as a corpus; a CI job on an Ubuntu runner that loads our policy into a
+real kernel and checks that allowed operations succeed and refused ones
+fail with EACCES; a structure aware fuzzer; and mutants that each named
+test must catch.
+
+**What it costs.** Upstream's parser and compiler are about twenty
+thousand lines of C and C++; this will not be much smaller. The language
+grows with every release and the kernel format with every new mediation
+class, so following upstream is a duty that does not end. Hosts running
+an older `apparmor_parser`, such as Ubuntu 24.04 with 4.0.1, may refuse a
+profile that uses 5.0 syntax and is accepted here. Until all of the above
+runs in CI and someone who did not write it has reviewed it, every public
+text calls it unreviewed (ADR-002).
