@@ -392,3 +392,52 @@ fn rsa_2048_sign() {
         )
     });
 }
+
+/// Decapsulation of a valid ciphertext against one that fails the
+/// re-encryption check: implicit rejection must take as long as
+/// success, or the time tells an attacker which ciphertexts decrypt.
+#[test]
+#[ignore]
+fn mlkem_decapsulation() {
+    use quantycore::tls::crypto::mlkem::{encapsulate_with, DecapsulationKey, CIPHERTEXT_LEN};
+    let k = DecapsulationKey::from_seed(&random::<32>(), &random::<32>());
+    let (valid, _) = encapsulate_with(k.encapsulation_key(), &random::<32>()).unwrap();
+    check("ML-KEM-768 decapsulation", || {
+        measure(
+            samples(40_000),
+            1,
+            |r| {
+                if r {
+                    let mut c = vec![0u8; CIPHERTEXT_LEN];
+                    rand::fill(&mut c).unwrap();
+                    c
+                } else {
+                    valid.clone()
+                }
+            },
+            |c| {
+                black_box(k.decapsulate(black_box(c)));
+            },
+        )
+    });
+}
+
+/// Encapsulation with a fixed and a random message, the secret from
+/// which the shared key is derived.
+#[test]
+#[ignore]
+fn mlkem_encapsulation() {
+    use quantycore::tls::crypto::mlkem::{encapsulate_with, DecapsulationKey};
+    let k = DecapsulationKey::from_seed(&random::<32>(), &random::<32>());
+    let ek = k.encapsulation_key().to_vec();
+    check("ML-KEM-768 encapsulation", || {
+        measure(
+            samples(10_000),
+            1,
+            |r| if r { random::<32>() } else { [0u8; 32] },
+            |m| {
+                black_box(encapsulate_with(black_box(&ek), m));
+            },
+        )
+    });
+}

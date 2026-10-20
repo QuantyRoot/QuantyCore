@@ -766,10 +766,10 @@ MUTANTS = [
     (
         "fuzz: a client indexes a key share it did not check",
         "src/tls/kx.rs",
-        """                let p: [u8; 32] = peer
-                    .try_into()
-                    .map_err(|_| Error::illegal("X25519 share is not 32 bytes"))?;""",
-        """                let p: [u8; 32] = peer[..32].try_into().unwrap();""",
+        """    let p: [u8; 32] = peer
+        .try_into()
+        .map_err(|_| Error::illegal("X25519 share is not 32 bytes"))?;""",
+        """    let p: [u8; 32] = peer[..32].try_into().unwrap();""",
         FUZZ, "fuzz_client_connection", [],
     ),
     (
@@ -869,6 +869,97 @@ MUTANTS = [
         "    let mut seed = server_random.to_vec();\n    seed.extend_from_slice(client_random);",
         "    let mut seed = client_random.to_vec();\n    seed.extend_from_slice(server_random);",
         INTEROP, "openssl_tls12", [],
+    ),
+    (
+        "sha3: wrong rotation in rho",
+        "src/tls/crypto/sha3.rs",
+        "0, 1, 62, 28, 27,",
+        "0, 1, 62, 28, 26,",
+        VECTORS, "acvp_sha3", ["QUANTY_ACVP"],
+    ),
+    (
+        "sha3: Keccak padding instead of SHA-3's",
+        "src/tls/crypto/sha3.rs",
+        "    let mut k = Keccak::new(136, 0x06);",
+        "    let mut k = Keccak::new(136, 0x01);",
+        UNIT, "known_answers", [],
+    ),
+    (
+        "shake: no permutation between squeezed blocks",
+        "src/tls/crypto/sha3.rs",
+        "        for o in out {\n            if self.pos == self.rate {\n                keccak_f(&mut self.a);",
+        "        for o in out {\n            if self.pos == self.rate {",
+        VECTORS, "acvp_shake", ["QUANTY_ACVP"],
+    ),
+    (
+        "mlkem: Barrett constant one too small",
+        "src/tls/crypto/mlkem.rs",
+        "1_290_167",
+        "1_290_166",
+        UNIT, "reductions_are_exact", [],
+    ),
+    (
+        "mlkem: compression rounds down",
+        "src/tls/crypto/mlkem.rs",
+        "        let n = ((*c as u64) << d) + (Q as u64 / 2);",
+        "        let n = (*c as u64) << d;",
+        UNIT, "reductions_are_exact", [],
+    ),
+    (
+        "mlkem: noise with the signs swapped",
+        "src/tls/crypto/mlkem.rs",
+        "            f[2 * i + h] = csub(x + Q - y);",
+        "            f[2 * i + h] = csub(y + Q - x);",
+        VECTORS, "acvp_mlkem", ["QUANTY_ACVP"],
+    ),
+    (
+        "mlkem: matrix not transposed in encryption",
+        "src/tls/crypto/mlkem.rs",
+        "        for (row, yj) in a.iter().zip(&y) {\n            mul_acc(&mut u, &row[i], yj);",
+        "        for (j, yj) in y.iter().enumerate() {\n            mul_acc(&mut u, &a[i][j], yj);",
+        VECTORS, "acvp_mlkem", ["QUANTY_ACVP"],
+    ),
+    (
+        "mlkem: encapsulation key modulus not checked",
+        "src/tls/crypto/mlkem.rs",
+        "            .all(|p| decode_raw(p, 12).iter().all(|&c| (c as u32) < Q))",
+        "            .all(|_| true)",
+        UNIT, "broken_hybrid_shares_are_refused", [],
+    ),
+    (
+        "mlkem: decapsulation key hash not checked",
+        "src/tls/crypto/mlkem.rs",
+        "        if !ct::eq(&sha3_256(ek), &dk[768 * K + 32..768 * K + 64]) || !ek_is_valid(ek) {",
+        "        if !ek_is_valid(ek) {",
+        VECTORS, "acvp_mlkem", ["QUANTY_ACVP"],
+    ),
+    (
+        "mlkem: no implicit rejection",
+        "src/tls/crypto/mlkem.rs",
+        "        ct::select_into(same, &mut out, k);",
+        "        ct::select_into(0xff, &mut out, k);",
+        UNIT, "round_trip_and_implicit_rejection", [],
+    ),
+    (
+        "mlkem: re-encryption compared with an early exit",
+        "src/tls/crypto/mlkem.rs",
+        "let diff = c2.iter().zip(c).fold(0u8, |acc, (x, y)| acc | (x ^ y));",
+        "let diff = c2.iter().zip(c).position(|(x, y)| x != y).map_or(0u8, |_| 1);",
+        TIMING, "mlkem_decapsulation", [],
+    ),
+    (
+        "hybrid: server puts X25519 first in the shared secret",
+        "src/tls/kx.rs",
+        "    Ok((out, concat(&ss, &xs)))",
+        "    Ok((out, concat(&xs, &ss)))",
+        UNIT, "the_hybrid_by_default_and_x25519_as_its_fallback", [],
+    ),
+    (
+        "hybrid: client sends no X25519 share along",
+        "src/tls/client.rs",
+        "        if group == group::X25519MLKEM768 && config.groups.contains(&group::X25519) {",
+        "        if false {",
+        UNIT, "the_hybrid_by_default_and_x25519_as_its_fallback", [],
     ),
 ]
 

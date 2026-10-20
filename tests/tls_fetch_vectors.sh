@@ -23,7 +23,11 @@ fetch() {
 fetch acvp https://github.com/usnistgov/ACVP-Server "$ACVP_COMMIT" \
     "/gen-val/json-files/SHA2-256-1.0/ /gen-val/json-files/SHA2-384-1.0/
      /gen-val/json-files/SHA2-512-1.0/ /gen-val/json-files/HMAC-SHA2-256-2.0/
-     /gen-val/json-files/HMAC-SHA2-384-2.0/ /gen-val/json-files/HMAC-SHA2-512-2.0/"
+     /gen-val/json-files/HMAC-SHA2-384-2.0/ /gen-val/json-files/HMAC-SHA2-512-2.0/
+     /gen-val/json-files/SHA3-256-2.0/ /gen-val/json-files/SHA3-512-2.0/
+     /gen-val/json-files/SHAKE-128-1.0/ /gen-val/json-files/SHAKE-256-1.0/
+     /gen-val/json-files/ML-KEM-keyGen-FIPS203/
+     /gen-val/json-files/ML-KEM-encapDecap-FIPS203/"
 fetch wycheproof https://github.com/C2SP/wycheproof "$WYCHEPROOF_COMMIT" \
     "/testvectors_v1/"
 fetch limbo https://github.com/C2SP/x509-limbo "$LIMBO_COMMIT" "/limbo.json"

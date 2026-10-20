@@ -711,3 +711,260 @@ fn wycheproof_rsa_pkcs1_sign() {
     eprintln!("RSA PKCS#1 signatures generated: {n}");
     assert!(n >= 20, "too few RSA signing cases");
 }
+
+#[test]
+fn acvp_sha3() {
+    use quantycore::tls::crypto::sha3::{sha3_256, sha3_512};
+    type Digest = fn(&[u8]) -> Vec<u8>;
+    let algs: [(&str, Digest); 2] = [
+        ("SHA3-256-2.0", |m| sha3_256(m).to_vec()),
+        ("SHA3-512-2.0", |m| sha3_512(m).to_vec()),
+    ];
+    for (name, f) in algs {
+        let Some(doc) = acvp(name) else {
+            return;
+        };
+        let (mut aft, mut mct) = (0, 0);
+        for group in doc.list("testGroups") {
+            for t in group.list("tests") {
+                match group.str("testType") {
+                    "AFT" => {
+                        let len = t.num("len") as usize;
+                        if !len.is_multiple_of(8) {
+                            continue;
+                        }
+                        assert_eq!(
+                            f(&t.hex("msg")[..len / 8]),
+                            t.hex("md"),
+                            "{name} {}",
+                            t.num("tcId")
+                        );
+                        aft += 1;
+                    }
+                    // SHA-3's Monte Carlo test chains single digests, not
+                    // three as SHA-2's does.
+                    "MCT" => {
+                        let mut md = t.hex("msg");
+                        for (j, r) in t.list("resultsArray").iter().enumerate() {
+                            for _ in 0..1000 {
+                                md = f(&md);
+                            }
+                            assert_eq!(md, r.hex("md"), "{name} MCT round {j}");
+                            mct += 1;
+                        }
+                    }
+                    "LDT" => {}
+                    other => panic!("unknown test type {other}"),
+                }
+            }
+        }
+        eprintln!("{name}: {aft} AFT, {mct} MCT rounds");
+        assert!(aft >= 80 && mct == 100, "{name} incomplete");
+    }
+}
+
+#[test]
+fn acvp_shake() {
+    use quantycore::tls::crypto::sha3::{shake128, shake256};
+    type Xof = fn(&[u8], &mut [u8]);
+    let algs: [(&str, Xof); 2] = [("SHAKE-128-1.0", shake128), ("SHAKE-256-1.0", shake256)];
+    for (name, f) in algs {
+        let Some(doc) = acvp(name) else {
+            return;
+        };
+        let (mut aft, mut mct) = (0, 0);
+        for group in doc.list("testGroups") {
+            for t in group.list("tests") {
+                match group.str("testType") {
+                    "AFT" | "VOT" => {
+                        let (len, out_len) = (t.num("len") as usize, t.num("outLen") as usize);
+                        if !len.is_multiple_of(8) || !out_len.is_multiple_of(8) {
+                            continue;
+                        }
+                        let mut out = vec![0u8; out_len / 8];
+                        f(&t.hex("msg")[..len / 8], &mut out);
+                        assert_eq!(out, t.hex("md"), "{name} {}", t.num("tcId"));
+                        aft += 1;
+                    }
+                    // The output length of each step comes from the last
+                    // 16 bits of the step before.
+                    "MCT" => {
+                        let min = group.num("minOutLen") as usize / 8;
+                        let max = group.num("maxOutLen") as usize / 8;
+                        let mut md = t.hex("msg");
+                        let mut out_len = max;
+                        for (j, r) in t.list("resultsArray").iter().enumerate() {
+                            for _ in 0..1000 {
+                                let mut m = md.clone();
+                                m.resize(16, 0);
+                                md = vec![0u8; out_len];
+                                f(&m, &mut md);
+                                let right = u16::from_be_bytes([md[md.len() - 2], md[md.len() - 1]])
+                                    as usize;
+                                out_len = min + right % (max - min + 1);
+                            }
+                            assert_eq!(md, r.hex("md"), "{name} MCT round {j}");
+                            mct += 1;
+                        }
+                    }
+                    "LDT" => {}
+                    other => panic!("unknown test type {other}"),
+                }
+            }
+        }
+        eprintln!("{name}: {aft} AFT and VOT, {mct} MCT rounds");
+        assert!(aft >= 200 && mct == 100, "{name} incomplete");
+    }
+}
+
+#[test]
+fn acvp_mlkem() {
+    use quantycore::tls::crypto::mlkem::{encapsulate_with, DecapsulationKey};
+    let Some(keygen) = acvp("ML-KEM-keyGen-FIPS203") else {
+        return;
+    };
+    let mut n = 0;
+    for group in keygen.list("testGroups") {
+        if group.str("parameterSet") != "ML-KEM-768" {
+            continue;
+        }
+        for t in group.list("tests") {
+            let d: [u8; 32] = t.hex("d").try_into().unwrap();
+            let z: [u8; 32] = t.hex("z").try_into().unwrap();
+            let k = DecapsulationKey::from_seed(&d, &z);
+            assert_eq!(
+                k.encapsulation_key(),
+                t.hex("ek"),
+                "keyGen {}",
+                t.num("tcId")
+            );
+            assert_eq!(k.to_bytes(), t.hex("dk"), "keyGen {}", t.num("tcId"));
+            n += 1;
+        }
+    }
+    let doc = acvp("ML-KEM-encapDecap-FIPS203").unwrap();
+    for group in doc.list("testGroups") {
+        if group.str("parameterSet") != "ML-KEM-768" {
+            continue;
+        }
+        for t in group.list("tests") {
+            let id = t.num("tcId");
+            match group.str("function") {
+                "encapsulation" => {
+                    let m: [u8; 32] = t.hex("m").try_into().unwrap();
+                    let (c, k) = encapsulate_with(&t.hex("ek"), &m).unwrap();
+                    assert_eq!(c, t.hex("c"), "encapsulation {id}");
+                    assert_eq!(k.expose(), t.hex("k"), "encapsulation {id}");
+                }
+                "decapsulation" => {
+                    let dk = DecapsulationKey::from_bytes(&t.hex("dk")).unwrap();
+                    let k = dk.decapsulate(&t.hex("c")).unwrap();
+                    assert_eq!(k.expose(), t.hex("k"), "decapsulation {id}");
+                }
+                "encapsulationKeyCheck" => {
+                    let ok = encapsulate_with(&t.hex("ek"), &[0; 32]).is_some();
+                    assert_eq!(
+                        ok,
+                        t.get("testPassed").unwrap().as_bool().unwrap(),
+                        "ek check {id}"
+                    );
+                }
+                "decapsulationKeyCheck" => {
+                    let ok = DecapsulationKey::from_bytes(&t.hex("dk")).is_some();
+                    assert_eq!(
+                        ok,
+                        t.get("testPassed").unwrap().as_bool().unwrap(),
+                        "dk check {id}"
+                    );
+                }
+                f => panic!("function {f}"),
+            }
+            n += 1;
+        }
+    }
+    eprintln!("ML-KEM-768: {n} ACVP cases");
+    assert!(n >= 25 + 25 + 10 + 20, "ACVP ML-KEM-768 incomplete");
+}
+
+#[test]
+fn wycheproof_mlkem() {
+    use quantycore::tls::crypto::mlkem::{encapsulate_with, DecapsulationKey};
+    let Some(doc) = wycheproof("mlkem_768_test.json") else {
+        return;
+    };
+    let (mut valid, mut invalid) = (0, 0);
+    for group in doc.list("testGroups") {
+        for t in group.list("tests") {
+            let id = t.num("tcId");
+            let seed = t.hex("seed");
+            let k = (seed.len() == 64).then(|| {
+                DecapsulationKey::from_seed(
+                    &seed[..32].try_into().unwrap(),
+                    &seed[32..].try_into().unwrap(),
+                )
+            });
+            let got = k.as_ref().and_then(|k| k.decapsulate(&t.hex("c")));
+            match t.str("result") {
+                "valid" => {
+                    let k = k.unwrap();
+                    assert_eq!(k.encapsulation_key(), t.hex("ek"), "tcId {id}");
+                    assert_eq!(got.unwrap().expose(), t.hex("K"), "tcId {id}");
+                    valid += 1;
+                }
+                "invalid" => {
+                    assert!(got.is_none(), "tcId {id} accepted");
+                    invalid += 1;
+                }
+                r => panic!("result {r}"),
+            }
+        }
+    }
+    let encaps = wycheproof("mlkem_768_encaps_test.json").unwrap();
+    for group in encaps.list("testGroups") {
+        for t in group.list("tests") {
+            let id = t.num("tcId");
+            let m: [u8; 32] = t.hex("m").try_into().unwrap();
+            let got = encapsulate_with(&t.hex("ek"), &m);
+            match t.str("result") {
+                "valid" => {
+                    let (c, k) = got.unwrap();
+                    assert_eq!(
+                        (c, k.expose().to_vec()),
+                        (t.hex("c"), t.hex("K")),
+                        "tcId {id}"
+                    );
+                    valid += 1;
+                }
+                "invalid" => {
+                    assert!(got.is_none(), "encaps tcId {id} accepted");
+                    invalid += 1;
+                }
+                r => panic!("result {r}"),
+            }
+        }
+    }
+    let decaps = wycheproof("mlkem_768_semi_expanded_decaps_test.json").unwrap();
+    for group in decaps.list("testGroups") {
+        for t in group.list("tests") {
+            let id = t.num("tcId");
+            let got =
+                DecapsulationKey::from_bytes(&t.hex("dk")).and_then(|k| k.decapsulate(&t.hex("c")));
+            match t.str("result") {
+                "valid" => {
+                    assert_eq!(got.unwrap().expose(), t.hex("K"), "decaps tcId {id}");
+                    valid += 1;
+                }
+                "invalid" => {
+                    assert!(got.is_none(), "decaps tcId {id} accepted");
+                    invalid += 1;
+                }
+                r => panic!("result {r}"),
+            }
+        }
+    }
+    eprintln!("ML-KEM-768: {valid} valid, {invalid} invalid");
+    assert!(
+        valid >= 290 && invalid >= 170,
+        "Wycheproof ML-KEM-768 incomplete"
+    );
+}

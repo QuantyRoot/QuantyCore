@@ -243,6 +243,9 @@ fn client_against_s_server_cipher(
     };
     assert!(page.contains(name), "{page}");
     assert_eq!(s.connection().protocol_version(), Some(v));
+    // OpenSSL before 3.5 has no ML-KEM and takes the X25519 share.
+    let g = s.connection().key_exchange_group().unwrap();
+    assert!(g == 0x001d || (g == 0x11ec && !tls12), "group {g:#x}");
     if let Some((_, id)) = cipher {
         assert_eq!(s.connection().cipher_suite(), Some(id));
     }
@@ -501,6 +504,10 @@ fn go_both_ways_with(mtls: bool, kind: Kind, tls12: bool) {
         s.connection().protocol_version(),
         Some(if tls12 { 0x0303 } else { 0x0304 })
     );
+    // Go has X25519MLKEM768 on by default since 1.24; TLS 1.2 falls back
+    // to X25519.
+    let group = if tls12 { 0x001d } else { 0x11ec };
+    assert_eq!(s.connection().key_exchange_group(), Some(group));
 
     // Our server, Go client.
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -524,6 +531,7 @@ fn go_both_ways_with(mtls: bool, kind: Kind, tls12: bool) {
         BufReader::new(&mut s).read_line(&mut line).unwrap();
         s.write_all(line.to_uppercase().as_bytes()).unwrap();
         s.close().unwrap();
+        assert_eq!(s.connection().key_exchange_group(), Some(group));
         exported(s.connection())
     });
     let out = Command::new(&bin)

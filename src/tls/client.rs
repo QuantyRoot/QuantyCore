@@ -40,7 +40,9 @@ pub(super) struct Offer {
     pub(super) session_id: Vec<u8>,
     pub(super) suites: Vec<u16>,
     pub(super) extensions: Vec<u16>,
-    pub(super) kx: KxSecret,
+    /// One share, or two when the first group is the hybrid: X25519 as
+    /// well, so that a server without ML-KEM needs no second round trip.
+    pub(super) kx: Vec<KxSecret>,
     ticket: Option<StoredTicket>,
 }
 
@@ -54,7 +56,10 @@ impl ClientConnection {
         rand::fill(&mut random).map_err(|_| Error::internal("no randomness"))?;
         rand::fill(&mut session_id).map_err(|_| Error::internal("no randomness"))?;
         let group = *config.groups.first().ok_or(Error::internal("no groups"))?;
-        let kx = KxSecret::generate(group)?;
+        let mut kx = vec![KxSecret::generate(group)?];
+        if group == group::X25519MLKEM768 && config.groups.contains(&group::X25519) {
+            kx.push(KxSecret::generate(group::X25519)?);
+        }
         let ticket = config.tickets.as_ref().and_then(|c| c.take(name));
         let hello = build_hello(&config, name, random, session_id, &kx, ticket.as_ref());
         Self::from_hello(config, Some(name.to_string()), hello, kx, ticket)
@@ -67,7 +72,7 @@ impl ClientConnection {
         config: Arc<ClientConfig>,
         name: Option<String>,
         mut hello: ClientHello,
-        kx: KxSecret,
+        kx: Vec<KxSecret>,
         ticket: Option<StoredTicket>,
     ) -> Result<ClientConnection, Error> {
         let mut core = Core::new();
@@ -103,7 +108,7 @@ fn build_hello(
     name: &str,
     random: [u8; 32],
     session_id: Vec<u8>,
-    kx: &KxSecret,
+    kx: &[KxSecret],
     ticket: Option<&StoredTicket>,
 ) -> ClientHello {
     let mut exts = Vec::new();
@@ -125,10 +130,14 @@ fn build_hello(
     add(ext::SUPPORTED_GROUPS, g);
     add(
         ext::KEY_SHARE,
-        write_client_key_shares(&[KeyShareEntry {
-            group: kx.group(),
-            key: kx.public(),
-        }]),
+        write_client_key_shares(
+            &kx.iter()
+                .map(|k| KeyShareEntry {
+                    group: k.group(),
+                    key: k.public(),
+                })
+                .collect::<Vec<_>>(),
+        ),
     );
     let mut s = Vec::new();
     put_u16_list(&mut s, 2, &offered_schemes(config));
@@ -284,10 +293,14 @@ impl State for ExpectServerHello {
             sh.ext(ext::KEY_SHARE)
                 .ok_or(Error::new(alert::MISSING_EXTENSION, "no key_share"))?,
         )?;
-        if share.group != s.offer.kx.group() {
-            return Err(Error::illegal("key share for a group not offered"));
-        }
-        let shared = s.offer.kx.agree(&share.key)?;
+        let kx = s
+            .offer
+            .kx
+            .iter()
+            .find(|k| k.group() == share.group)
+            .ok_or(Error::illegal("key share for a group not offered"))?;
+        let shared = kx.agree(&share.key)?;
+        core.group = Some(share.group);
 
         let psk = match sh.ext(ext::PRE_SHARED_KEY) {
             None => None,
@@ -357,7 +370,9 @@ impl ExpectServerHello {
             None => None,
         };
         if let Some(g) = group {
-            if !self.offer.config.groups.contains(&g) || g == self.offer.kx.group() {
+            if !self.offer.config.groups.contains(&g)
+                || self.offer.kx.iter().any(|k| k.group() == g)
+            {
                 return Err(Error::illegal(
                     "HelloRetryRequest asks for an unusable group",
                 ));
@@ -371,16 +386,23 @@ impl ExpectServerHello {
         self.transcript.replace_with_message_hash(suite.hash);
         self.transcript.add(&raw);
         if let Some(g) = group {
-            self.offer.kx = KxSecret::generate(g)?;
+            self.offer.kx = vec![KxSecret::generate(g)?];
         }
         let mut hello = self.hello.clone();
         hello.extensions.retain(|e| e.typ != ext::EARLY_DATA);
         for e in hello.extensions.iter_mut() {
             if e.typ == ext::KEY_SHARE {
-                e.data = write_client_key_shares(&[KeyShareEntry {
-                    group: self.offer.kx.group(),
-                    key: self.offer.kx.public(),
-                }]);
+                e.data = write_client_key_shares(
+                    &self
+                        .offer
+                        .kx
+                        .iter()
+                        .map(|k| KeyShareEntry {
+                            group: k.group(),
+                            key: k.public(),
+                        })
+                        .collect::<Vec<_>>(),
+                );
             }
         }
         if let Some(c) = cookie {

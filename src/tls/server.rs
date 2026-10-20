@@ -9,7 +9,7 @@ use super::crypto::ct::Secret;
 use super::crypto::rand;
 use super::error::{alert, Error};
 use super::key_schedule::{finished_verify_data, resumption_psk, verify_finished, KeySchedule};
-use super::kx::KxSecret;
+use super::kx::{self, KxSecret};
 use super::msgs::*;
 use super::server12;
 use super::suites::{tls13_suite, Suite};
@@ -222,25 +222,29 @@ impl State for ExpectClientHello {
         };
         transcript.add(&raw);
 
-        let (random, kx) = match s.fixed.take() {
-            Some(f) => f,
+        let (random, server_share, shared) = match s.fixed.take() {
+            Some((r, kx)) => {
+                if kx.group() != share.group {
+                    return Err(Error::internal("key share group"));
+                }
+                let shared = kx.agree(&share.key)?;
+                (r, kx.public(), shared)
+            }
             None => {
                 let mut r = [0u8; 32];
                 rand::fill(&mut r).map_err(|_| Error::internal("no randomness"))?;
-                (r, KxSecret::generate(share.group)?)
+                let (public, shared) = kx::respond(share.group, &share.key)?;
+                (r, public, shared)
             }
         };
-        if kx.group() != share.group {
-            return Err(Error::internal("key share group"));
-        }
-        let shared = kx.agree(&share.key)?;
+        core.group = Some(share.group);
 
         let mut exts = vec![
             Extension {
                 typ: ext::KEY_SHARE,
                 data: write_server_key_share(&KeyShareEntry {
                     group: share.group,
-                    key: kx.public(),
+                    key: server_share,
                 }),
             },
             Extension {

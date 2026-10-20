@@ -137,6 +137,7 @@ pub(crate) struct Core {
     /// TLS 1.2 was negotiated: change_cipher_spec switches the read keys
     /// to `pending_read` instead of being ignored.
     pub(crate) tls12: Option<Suite12>,
+    pub(crate) group: Option<u16>,
     pending_read: Option<Protection>,
     /// The master secret and both randoms, for the RFC 5705 exporter.
     pub(crate) exporter12: Option<(Secret, Vec<u8>)>,
@@ -175,6 +176,7 @@ impl Core {
             server_name: None,
             resumed: false,
             tls12: None,
+            group: None,
             pending_read: None,
             exporter12: None,
         }
@@ -593,6 +595,12 @@ impl Connection {
         } else {
             self.core.suite.map(|_| 0x0304)
         }
+    }
+
+    /// The key exchange group, such as 0x11ec for X25519MLKEM768, once
+    /// the peer's share has been used.
+    pub fn key_exchange_group(&self) -> Option<u16> {
+        self.core.group
     }
 
     /// True if this connection was resumed from a session ticket.

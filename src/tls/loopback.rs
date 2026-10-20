@@ -598,16 +598,111 @@ fn hello_retry_request_to_a_group_the_server_prefers() {
 fn every_group_and_suite() {
     use super::msgs::group;
     use super::suites::ALL_TLS13;
-    for g in [group::X25519, group::SECP256R1, group::SECP384R1] {
+    for g in [
+        group::X25519MLKEM768,
+        group::X25519,
+        group::SECP256R1,
+        group::SECP384R1,
+    ] {
         for suite in ALL_TLS13 {
             let mut p = pair();
             p.client.groups = vec![g];
             p.client.suites = vec![suite];
             let (mut c, mut s) = connect(p.client, p.server);
             assert_eq!(c.cipher_suite(), Some(suite.id));
+            assert_eq!(c.key_exchange_group(), Some(g));
             s.write(b"x").unwrap();
             pump(&mut c, &mut s, usize::MAX).unwrap();
             assert_eq!(c.take_plaintext(), b"x");
         }
     }
+}
+
+#[test]
+fn the_hybrid_by_default_and_x25519_as_its_fallback() {
+    use super::msgs::{group, ServerHello, HRR_RANDOM};
+    let p = pair();
+    let (c, s) = connect(p.client, p.server);
+    assert_eq!(c.key_exchange_group(), Some(group::X25519MLKEM768));
+    assert_eq!(s.key_exchange_group(), Some(group::X25519MLKEM768));
+
+    // A server without ML-KEM takes the X25519 share sent along with the
+    // hybrid one, without a HelloRetryRequest.
+    let mut p = pair();
+    p.server.groups = vec![group::SECP256R1, group::X25519];
+    let mut c = ClientConnection::new(Arc::new(p.client), "example.test").unwrap();
+    let mut s = ServerConnection::new(Arc::new(p.server));
+    s.read_tls(&c.take_tls()).unwrap();
+    let flight = s.take_tls();
+    let len = u32::from_be_bytes([0, flight[6], flight[7], flight[8]]) as usize;
+    assert_ne!(
+        ServerHello::parse(&flight[9..9 + len]).unwrap().random,
+        HRR_RANDOM
+    );
+    c.read_tls(&flight).unwrap();
+    pump(&mut c, &mut s, usize::MAX).unwrap();
+    assert!(!c.is_handshaking());
+    assert_eq!(c.key_exchange_group(), Some(group::X25519));
+}
+
+#[test]
+fn broken_hybrid_shares_are_refused() {
+    use super::msgs::{
+        ext, group, read_client_key_shares, read_server_key_share, write_client_key_shares,
+        write_server_key_share,
+    };
+    let edit_share = |f: fn(&mut Vec<u8>)| {
+        move |ch: &mut super::msgs::ClientHello| {
+            for e in ch.extensions.iter_mut() {
+                if e.typ == ext::KEY_SHARE {
+                    let mut shares = read_client_key_shares(&e.data).unwrap();
+                    assert_eq!(shares[0].group, group::X25519MLKEM768);
+                    f(&mut shares[0].key);
+                    e.data = write_client_key_shares(&shares);
+                }
+            }
+        }
+    };
+    type Case = (&'static str, fn(&mut Vec<u8>));
+    let cases: [Case; 3] = [
+        ("one byte short", |k| {
+            k.pop();
+        }),
+        ("one byte long", |k| k.push(0)),
+        // The first coefficient of the ML-KEM key set to 4095, above q:
+        // the modulus check of FIPS 203 7.2.
+        ("a coefficient not reduced", |k| {
+            k[0] = 0xff;
+            k[1] |= 0x0f;
+        }),
+    ];
+    for (what, f) in cases {
+        let e = tamper_client_hello(edit_share(f));
+        assert_eq!(alert_of(&e), alert::ILLEGAL_PARAMETER, "{what}");
+    }
+    let e = tamper_server_hello(|sh| {
+        for e in sh.extensions.iter_mut() {
+            if e.typ == ext::KEY_SHARE {
+                let mut share = read_server_key_share(&e.data).unwrap();
+                share.key.pop();
+                e.data = write_server_key_share(&share);
+            }
+        }
+    });
+    assert_eq!(alert_of(&e), alert::ILLEGAL_PARAMETER);
+}
+
+#[test]
+fn groups_can_be_chosen_among_the_supported_ones() {
+    use super::msgs::group;
+    let mut p = pair();
+    assert!(p.client.set_groups(&[0x0019]).is_err());
+    assert!(p.client.set_groups(&[]).is_err());
+    assert!(p.server.set_groups(&[group::X25519, 0x0100]).is_err());
+    p.client
+        .set_groups(&[group::SECP384R1, group::SECP384R1])
+        .unwrap();
+    assert_eq!(p.client.groups, vec![group::SECP384R1]);
+    let (c, _) = connect(p.client, p.server);
+    assert_eq!(c.key_exchange_group(), Some(group::SECP384R1));
 }

@@ -181,6 +181,7 @@ struct Corpus {
     server_flight: Vec<u8>,
     client_config: Arc<ClientConfig>,
     server_config: Arc<ServerConfig>,
+    server_config_x25519: Arc<ServerConfig>,
 }
 
 fn corpus() -> Corpus {
@@ -217,6 +218,13 @@ fn corpus() -> Corpus {
         )
         .unwrap(),
     );
+    let mut x = ServerConfig::new(
+        vec![leaf.clone()],
+        PrivateKey::from_pkcs8(&leaf_key.to_pkcs8()).unwrap(),
+    )
+    .unwrap();
+    x.set_groups(&[msgs::group::X25519]).unwrap();
+    let server_config_x25519 = Arc::new(x);
 
     // One handshake recorded in both directions. The certificate is not
     // valid at the real time, so the client stops after the server's
@@ -234,6 +242,7 @@ fn corpus() -> Corpus {
         server_flight,
         client_config,
         server_config,
+        server_config_x25519,
     }
 }
 
@@ -331,7 +340,14 @@ fn fuzz_client_connection() {
     let c = corpus();
     run("client", 3000, |rng| {
         let mut cl = ClientConnection::new(c.client_config.clone(), "fuzz.test").unwrap();
-        let mut s = ServerConnection::new(c.server_config.clone());
+        // Every other case the server answers the X25519 share instead of
+        // the hybrid one.
+        let server = if rng.below(2) == 0 {
+            &c.server_config
+        } else {
+            &c.server_config_x25519
+        };
+        let mut s = ServerConnection::new(server.clone());
         s.read_tls(&cl.take_tls()).unwrap();
         let flight = s.take_tls();
         let input = if rng.below(2) == 0 {

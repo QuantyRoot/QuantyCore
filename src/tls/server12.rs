@@ -8,7 +8,7 @@ use super::crypto::ct::Secret;
 use super::crypto::rand;
 use super::error::{alert, Error};
 use super::key_schedule::verify_finished;
-use super::kx::KxSecret;
+use super::kx::{self, KxSecret};
 use super::msgs::*;
 use super::record::Protection;
 use super::server::choose_alpn;
@@ -72,7 +72,7 @@ pub(super) fn client_hello(
         .groups
         .iter()
         .copied()
-        .find(|g| groups.contains(g))
+        .find(|&g| kx::is_ecdhe(g) && groups.contains(&g))
         .ok_or(Error::handshake_failure("no common group"))?;
     // Without signature_algorithms the default would be SHA-1, which is
     // not supported.
@@ -99,6 +99,7 @@ pub(super) fn client_hello(
     }
     core.alpn = choose_alpn(&config, &ch, None)?;
     core.tls12 = Some(suite);
+    core.group = Some(group);
 
     // RFC 8446 4.1.3: the last eight bytes tell a client that also
     // speaks 1.3 that it was talked down.

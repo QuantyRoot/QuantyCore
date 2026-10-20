@@ -12,7 +12,7 @@ mod conn;
 pub mod crypto;
 pub mod error;
 pub mod key_schedule;
-mod kx;
+pub mod kx;
 mod loopback;
 mod loopback12;
 pub mod msgs;

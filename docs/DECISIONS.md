@@ -748,3 +748,39 @@ change_cipher_spec out of place; records built by hand from the RFCs;
 fuzzing of the 1.2 hellos; and fourteen mutants, two of which (the
 master secret label and the key block seed) only interop can find,
 since both sides of a loopback would agree on the same mistake.
+
+## ADR-029: X25519MLKEM768 by default, with X25519 sent along
+
+TLS 1.3 connections use the hybrid X25519MLKEM768
+(draft-ietf-tls-ecdhe-mlkem) by default: ML-KEM-768 (FIPS 203) and
+X25519 together, the shared secret both concatenated. Traffic recorded
+today stays confidential against a future quantum computer as long as
+ML-KEM holds, and against everything else as long as X25519 holds. Go
+since 1.24, OpenSSL since 3.5 and the major browsers do the same.
+
+**Two key shares:** the client sends the hybrid share (1216 bytes) and
+an X25519 share. A server without ML-KEM takes the X25519 one, so the
+default costs servers that are not ready yet no extra round trip. The
+cost is a ClientHello about 1.2 KB larger. `set_groups` changes the
+order or drops groups, on both sides; TLS 1.2 never uses the hybrid.
+
+**ML-KEM-768** is written from FIPS 203 with SHA-3 and SHAKE from FIPS
+202 under it. Coefficients are reduced with multiplications and masked
+subtractions only. In particular no secret value is divided: a compiler
+may turn `x / q` into a division instruction whose time depends on `x`,
+which is the KyberSlash attack on implementations that did. Implicit
+rejection selects the key without a branch, and the re-encryption check
+compares in constant time. Keys are checked as FIPS 203 7.2 and 7.3
+require (the modulus check of the encapsulation key, the hash check of
+the decapsulation key). Only ML-KEM-768 is built.
+
+**Checked by:** NIST ACVP for SHA3-256, SHA3-512, SHAKE128 and SHAKE256
+(including their Monte Carlo tests) and for ML-KEM-768 key generation,
+encapsulation, decapsulation and both key checks; Wycheproof's ML-KEM-768
+suites, including malformed keys and ciphertexts and the implicit
+rejection cases; handshakes with Go 1.24 in both directions that
+negotiate X25519MLKEM768 and agree on exported keying material; the
+timing test on decapsulation of valid against rejected ciphertexts and
+on encapsulation; loopback tests of the fallback and of broken shares;
+and mutants, one of which is an early exit in the re-encryption
+comparison that only the timing test can see.

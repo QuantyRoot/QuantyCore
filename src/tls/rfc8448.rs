@@ -542,7 +542,8 @@ fn client_path(t: &[Step]) -> usize {
         .try_into()
         .unwrap();
     let kx = KxSecret::X25519(x25519::PrivateKey::from_bytes(&key));
-    let mut c = ClientConnection::from_hello(Arc::new(config), None, hello, kx, None).unwrap();
+    let mut c =
+        ClientConnection::from_hello(Arc::new(config), None, hello, vec![kx], None).unwrap();
 
     let mut checked = 0;
     let mut sent = c.take_tls();
@@ -673,7 +674,8 @@ fn client_refuses_a_forged_server_finished() {
         .try_into()
         .unwrap();
     let kx = KxSecret::X25519(x25519::PrivateKey::from_bytes(&key));
-    let mut c = ClientConnection::from_hello(Arc::new(config), None, hello, kx, None).unwrap();
+    let mut c =
+        ClientConnection::from_hello(Arc::new(config), None, hello, vec![kx], None).unwrap();
     c.read_tls(step(t, "server", "send handshake record", 0).get("complete record"))
         .unwrap();
     let e = c.read_tls(&forged).unwrap_err();

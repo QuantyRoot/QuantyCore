@@ -6,12 +6,26 @@ use super::crypto::aead::Aead;
 use super::crypto::chacha20poly1305::ChaCha20Poly1305;
 use super::crypto::ct::Secret;
 use super::crypto::rand;
+use super::error::Error;
 use super::kx;
 use super::suites::{self, Suite, Suite12};
 use super::x509::{PrivateKey, RootStore, Usage, Verifier};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
+
+fn checked_groups(groups: &[u16]) -> Result<Vec<u16>, Error> {
+    if groups.is_empty() || groups.iter().any(|g| !kx::SUPPORTED_GROUPS.contains(g)) {
+        return Err(Error::internal("unsupported key exchange group"));
+    }
+    let mut v: Vec<u16> = Vec::new();
+    for &g in groups {
+        if !v.contains(&g) {
+            v.push(g);
+        }
+    }
+    Ok(v)
+}
 
 /// A resumption ticket a client holds for one server.
 #[derive(Clone)]
@@ -121,6 +135,14 @@ impl ClientConfig {
         self.tickets = None;
     }
 
+    /// The key exchange groups to offer, most preferred first, from
+    /// `kx::SUPPORTED_GROUPS`. The first gets a key share in the
+    /// ClientHello, and X25519 a second one when the first is the hybrid.
+    pub fn set_groups(&mut self, groups: &[u16]) -> Result<(), Error> {
+        self.groups = checked_groups(groups)?;
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(crate) fn set_client_signer(&mut self, chain: Vec<Vec<u8>>, key: Arc<dyn Signer>) {
         self.client_cert = Some((chain, key));
@@ -223,6 +245,13 @@ impl ServerConfig {
 
     pub fn disable_resumption(&mut self) {
         self.tickets = None;
+    }
+
+    /// The key exchange groups to accept, most preferred first, from
+    /// `kx::SUPPORTED_GROUPS`.
+    pub fn set_groups(&mut self, groups: &[u16]) -> Result<(), Error> {
+        self.groups = checked_groups(groups)?;
+        Ok(())
     }
 
     #[cfg(test)]

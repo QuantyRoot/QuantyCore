@@ -7,7 +7,7 @@ use super::conn::{Core, State};
 use super::crypto::ct::Secret;
 use super::error::{alert, Error};
 use super::key_schedule::verify_finished;
-use super::kx::KxSecret;
+use super::kx::{self, KxSecret};
 use super::msgs::*;
 use super::suites::{tls12_suite, Suite12};
 use super::tls12::*;
@@ -145,7 +145,7 @@ struct ExpectServerKx {
 impl State for ExpectServerKx {
     fn handle(
         self: Box<Self>,
-        _core: &mut Core,
+        core: &mut Core,
         msg: Handshake,
         raw: Vec<u8>,
     ) -> Result<Box<dyn State>, Error> {
@@ -154,7 +154,7 @@ impl State for ExpectServerKx {
             return Err(Error::unexpected("expected ServerKeyExchange"));
         }
         let skx = ServerKx::parse(&msg.body)?;
-        if !hs.offer.config.groups.contains(&skx.group) {
+        if !kx::is_ecdhe(skx.group) || !hs.offer.config.groups.contains(&skx.group) {
             return Err(Error::illegal("group not offered"));
         }
         if !offered_schemes(&hs.offer.config).contains(&skx.scheme)
@@ -165,6 +165,7 @@ impl State for ExpectServerKx {
         let signed = signed_params(&hs.client_random, &hs.server_random, &skx.params());
         self.key.verify12(skx.scheme, &signed, &skx.signature)?;
         let kx = KxSecret::generate(skx.group)?;
+        core.group = Some(skx.group);
         let shared = kx.agree(&skx.point)?;
         hs.transcript.extend_from_slice(&raw);
         Ok(Box::new(ExpectServerHelloDone {
