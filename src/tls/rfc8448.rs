@@ -460,3 +460,288 @@ fn parser_finds_every_section() {
         .collect();
     assert_eq!(numbers, [3, 4, 5, 6, 7]);
 }
+
+/// Stands in for certificate validation in the trace tests: accepts the
+/// trace's RSA chain and every signature scheme the trace offers.
+struct TraceVerifier;
+
+impl crate::tls::auth::PeerVerifier for TraceVerifier {
+    fn verify(
+        &self,
+        _chain: &[Vec<u8>],
+        _name: Option<&str>,
+    ) -> Result<crate::tls::auth::PublicKey, crate::tls::Error> {
+        Ok(crate::tls::auth::PublicKey::AcceptAny)
+    }
+    fn schemes(&self) -> Vec<u16> {
+        vec![
+            0x0403, 0x0503, 0x0603, 0x0203, 0x0804, 0x0805, 0x0806, 0x0401, 0x0501, 0x0601,
+        ]
+    }
+}
+
+/// Signs by returning the signature the trace shows. RSA-PSS is
+/// randomized, so the trace's signature cannot be produced again; what is
+/// checked is everything around it.
+struct TraceSigner {
+    scheme: u16,
+    signature: Vec<u8>,
+}
+
+impl crate::tls::auth::Signer for TraceSigner {
+    fn choose_scheme(&self, offered: &[u16]) -> Option<u16> {
+        offered.contains(&self.scheme).then_some(self.scheme)
+    }
+    fn sign(&self, _s: u16, _m: &[u8]) -> Result<Vec<u8>, crate::tls::Error> {
+        Ok(self.signature.clone())
+    }
+}
+
+/// Runs this crate's client from the trace's ClientHello and key share:
+/// feeds it every record the server sent, in order, and requires every
+/// record the client sends to be the trace's, byte for byte.
+fn client_path(t: &[Step]) -> usize {
+    use crate::tls::config::ClientConfig;
+    use crate::tls::kx::KxSecret;
+    use crate::tls::ClientConnection;
+    use std::sync::Arc;
+
+    let mut config = ClientConfig::with_verifier(Arc::new(TraceVerifier));
+    config.disable_resumption();
+    let hellos: Vec<&Step> = t
+        .iter()
+        .filter(|s| s.who == "client" && s.what.starts_with("construct a ClientHello"))
+        .collect();
+    let hello = ClientHello::parse(&hellos[0].get("ClientHello")[4..]).unwrap();
+    // The client's certificate and signature, when the server asks.
+    if let Some(cert) = t
+        .iter()
+        .find(|s| s.who == "client" && s.what.starts_with("construct a Certificate "))
+    {
+        let cv = t
+            .iter()
+            .find(|s| s.who == "client" && s.what.starts_with("construct a CertificateVerify"))
+            .unwrap();
+        let cv = CertificateVerify::parse(&cv.get("CertificateVerify")[4..]).unwrap();
+        let chain = Certificate::parse(&cert.get("Certificate")[4..])
+            .unwrap()
+            .entries
+            .into_iter()
+            .map(|e| e.der)
+            .collect();
+        config.set_client_certificate(
+            chain,
+            Arc::new(TraceSigner {
+                scheme: cv.scheme,
+                signature: cv.signature,
+            }),
+        );
+    }
+    let key: [u8; 32] = step(t, "client", "create an ephemeral x25519", 0)
+        .get("private key")
+        .try_into()
+        .unwrap();
+    let kx = KxSecret::X25519(x25519::PrivateKey::from_bytes(&key));
+    let mut c = ClientConnection::from_hello(Arc::new(config), None, hello, kx, None).unwrap();
+
+    let mut checked = 0;
+    let mut sent = c.take_tls();
+    for s in t.iter().filter(|s| s.what.starts_with("send ")) {
+        let complete = s.get("complete record").to_vec();
+        if s.who == "server" {
+            c.read_tls(&complete)
+                .unwrap_or_else(|e| panic!("{}: {e}", s.what));
+            sent.extend(c.take_tls());
+            continue;
+        }
+        if s.what.starts_with("send application_data") {
+            c.write(s.get("payload")).unwrap();
+            sent.extend(c.take_tls());
+        } else if s.what.starts_with("send alert") {
+            c.close();
+            sent.extend(c.take_tls());
+        }
+        assert!(
+            sent.starts_with(&complete),
+            "client record for '{}' differs",
+            s.what
+        );
+        sent.drain(..complete.len());
+        checked += 1;
+    }
+    assert!(sent.is_empty(), "client sent more than the trace");
+    // The server's application data arrived as plaintext.
+    let got = c.take_plaintext();
+    let want: Vec<u8> = t
+        .iter()
+        .filter(|s| s.who == "server" && s.what.starts_with("send application_data"))
+        .flat_map(|s| s.get("payload").to_vec())
+        .collect();
+    assert_eq!(got, want);
+    checked
+}
+
+#[test]
+fn client_follows_the_traces() {
+    let Some(all) = load() else {
+        return;
+    };
+    for n in [3, 6, 7] {
+        let k = client_path(section(&all, n));
+        eprintln!("section {n}: {k} client records");
+        assert!(k >= 3, "section {n}");
+    }
+}
+
+/// The server, given the trace's random and key share, answers the
+/// trace's ClientHello with the trace's ServerHello. What follows differs
+/// on purpose: the trace's EncryptedExtensions carry extensions this
+/// server does not send.
+#[test]
+fn server_hello_matches_the_trace() {
+    use crate::tls::config::ServerConfig;
+    use crate::tls::kx::KxSecret;
+    use crate::tls::ServerConnection;
+    use std::sync::Arc;
+
+    let Some(all) = load() else {
+        return;
+    };
+    let t = section(&all, 3);
+    let mut config = ServerConfig::with_signer(
+        vec![vec![1]],
+        Arc::new(TraceSigner {
+            scheme: 0x0804,
+            signature: vec![0; 128],
+        }),
+    )
+    .unwrap();
+    config.suites = vec![suites::TLS_AES_128_GCM_SHA256];
+    let random: [u8; 32] = ServerHello::parse(
+        &step(t, "server", "construct a ServerHello", 0).get("ServerHello")[4..],
+    )
+    .unwrap()
+    .random;
+    let key: [u8; 32] = step(t, "server", "create an ephemeral x25519", 0)
+        .get("private key")
+        .try_into()
+        .unwrap();
+    let mut s = ServerConnection::with_fixed(
+        Arc::new(config),
+        random,
+        KxSecret::X25519(x25519::PrivateKey::from_bytes(&key)),
+    );
+    s.read_tls(step(t, "client", "send handshake record", 0).get("complete record"))
+        .unwrap();
+    let out = s.take_tls();
+    let sh_record = step(t, "server", "send handshake record", 0).get("complete record");
+    assert!(out.starts_with(sh_record));
+}
+
+/// A server Finished with one bit changed, re-encrypted under the trace's
+/// handshake key so that only the Finished itself is wrong. The client
+/// must stop with decrypt_error.
+#[test]
+fn client_refuses_a_forged_server_finished() {
+    use crate::tls::config::ClientConfig;
+    use crate::tls::error::{alert, Error};
+    use crate::tls::kx::KxSecret;
+    use crate::tls::ClientConnection;
+    use std::sync::Arc;
+
+    let Some(all) = load() else {
+        return;
+    };
+    let t = section(&all, 3);
+    let s_hs = step(t, "server", "derive secret \"tls13 s hs traffic\"", 0).get("expanded");
+    let flight = step(t, "server", "send handshake record", 1);
+    let mut payload = flight.get("payload").to_vec();
+    *payload.last_mut().unwrap() ^= 1;
+    let mut forged = Vec::new();
+    Protection::tls13(suites::TLS_AES_128_GCM_SHA256, s_hs)
+        .seal13(content::HANDSHAKE, &payload, &mut forged)
+        .unwrap();
+
+    let mut config = ClientConfig::with_verifier(Arc::new(TraceVerifier));
+    config.disable_resumption();
+    let hello = ClientHello::parse(
+        &step(t, "client", "construct a ClientHello", 0).get("ClientHello")[4..],
+    )
+    .unwrap();
+    let key: [u8; 32] = step(t, "client", "create an ephemeral x25519", 0)
+        .get("private key")
+        .try_into()
+        .unwrap();
+    let kx = KxSecret::X25519(x25519::PrivateKey::from_bytes(&key));
+    let mut c = ClientConnection::from_hello(Arc::new(config), None, hello, kx, None).unwrap();
+    c.read_tls(step(t, "server", "send handshake record", 0).get("complete record"))
+        .unwrap();
+    let e = c.read_tls(&forged).unwrap_err();
+    assert!(
+        matches!(
+            e,
+            Error::Local {
+                alert: alert::DECRYPT_ERROR,
+                ..
+            }
+        ),
+        "{e}"
+    );
+}
+
+/// The server, from the trace's ClientHello, derives the trace's client
+/// handshake key, because those depend only on the two hellos. Its own
+/// EncryptedExtensions differ from the trace's, so the trace's client
+/// Finished, which decrypts fine, is over another transcript and must be
+/// refused.
+#[test]
+fn server_refuses_a_finished_over_another_transcript() {
+    use crate::tls::config::ServerConfig;
+    use crate::tls::error::{alert, Error};
+    use crate::tls::kx::KxSecret;
+    use crate::tls::ServerConnection;
+    use std::sync::Arc;
+
+    let Some(all) = load() else {
+        return;
+    };
+    let t = section(&all, 3);
+    let mut config = ServerConfig::with_signer(
+        vec![vec![1]],
+        Arc::new(TraceSigner {
+            scheme: 0x0804,
+            signature: vec![0; 128],
+        }),
+    )
+    .unwrap();
+    config.suites = vec![suites::TLS_AES_128_GCM_SHA256];
+    let random = ServerHello::parse(
+        &step(t, "server", "construct a ServerHello", 0).get("ServerHello")[4..],
+    )
+    .unwrap()
+    .random;
+    let key: [u8; 32] = step(t, "server", "create an ephemeral x25519", 0)
+        .get("private key")
+        .try_into()
+        .unwrap();
+    let mut s = ServerConnection::with_fixed(
+        Arc::new(config),
+        random,
+        KxSecret::X25519(x25519::PrivateKey::from_bytes(&key)),
+    );
+    s.read_tls(step(t, "client", "send handshake record", 0).get("complete record"))
+        .unwrap();
+    let e = s
+        .read_tls(step(t, "client", "send handshake record", 1).get("complete record"))
+        .unwrap_err();
+    assert!(
+        matches!(
+            e,
+            Error::Local {
+                alert: alert::DECRYPT_ERROR,
+                ..
+            }
+        ),
+        "{e}"
+    );
+}

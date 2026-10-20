@@ -16,6 +16,7 @@ through and add a new entry, never silently edit history.
 - [ADR-009](#adr-009-http11-for-registries-with-one-reading-of-every-response) HTTP/1.1 for registries, with one reading of every response
 - [ADR-020](#adr-020-tls-scope-widened-to-a-complete-implementation) TLS scope widened to a complete implementation
 - [ADR-021](#adr-021-aead-built-for-constant-time-not-speed) AEAD built for constant time, not speed
+- [ADR-022](#adr-022-the-tls-13-handshake-sans-io-compatibility-mode-stateless-tickets) The TLS 1.3 handshake: sans I/O, compatibility mode, stateless tickets
 
 ## ADR-001: Nothing outside the standard library, and QuantyRoot is not outside
 
@@ -456,3 +457,51 @@ AES-GCM otherwise. Clients state their own preference as usual.
 half as fast on the 64-bit machines every consumer runs on; and table
 based AES with the tables preloaded into cache before every block, which
 narrows the leak but does not close it.
+
+## ADR-022: The TLS 1.3 handshake: sans I/O, compatibility mode, stateless tickets
+
+**Shape.** A connection takes received bytes with `read_tls`, hands out
+bytes to send with `take_tls`, and carries plaintext with `write` and
+`read`. It never touches a socket. Each handshake state is its own type
+that consumes the next message and returns the next state, so a message
+that arrives out of order has no state that would accept it. The key
+schedule hands out secrets and the record layer derives keys from them,
+which is the split a QUIC transport needs later.
+
+**Choices a later reader might question:**
+
+- The client always uses middlebox compatibility mode (RFC 8446 D.4): a
+  random 32-byte legacy session id and a dummy change_cipher_spec before
+  its second flight. Costs 38 bytes per handshake; without it, some
+  corporate middleboxes drop TLS 1.3 handshakes as malformed 1.2.
+- Resumption only with `psk_dhe_ke`, so every resumed connection still
+  runs a fresh key exchange and a stolen ticket does not decrypt it.
+  No 0-RTT (ADR-020).
+- Tickets are stateless: the session, sealed with ChaCha20-Poly1305
+  under a key that lives only in the server process. A restart
+  invalidates every ticket, which costs each client one full handshake.
+  Sharing the key across server instances would mean distributing a
+  secret that decrypts every ticket, and is not built until a deployment
+  needs it.
+- The server sends two tickets per handshake and the client uses each
+  once (RFC 8446 C.4), so two parallel connections can both resume
+  without reusing a ticket.
+- A HelloRetryRequest carries no cookie: the server keeps the first
+  hello's hash in the connection, which exists anyway in this design.
+- Limits against a peer that only wants to occupy memory or time: 256
+  KiB per handshake message, and 32 records in a row that carry nothing
+  (empty data, change_cipher_spec, warning alerts).
+
+**Not public yet.** Building a configuration needs a certificate
+verifier, and the only correct verifier is X.509 path validation, which
+does not exist yet. The constructors therefore stay inside the crate and
+only the tests use them, with a verifier that compares a raw Ed25519
+key. There is deliberately no way to build a client that skips
+verification, not even temporarily.
+
+**Checked by:** the RFC 8448 traces, where the client, started from the
+trace's ClientHello and key, has to produce every one of the trace's
+client records byte for byte, and the server has to produce the trace's
+ServerHello; loopback tests of both sides against each other; and
+tampered hellos in both directions, each of which must end with the
+alert RFC 8446 prescribes.

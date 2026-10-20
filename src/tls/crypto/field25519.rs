@@ -28,6 +28,10 @@ impl Fe {
         ])
     }
 
+    pub(crate) fn from_small(v: u32) -> Fe {
+        Fe([v as u64, 0, 0, 0, 0])
+    }
+
     fn carry(mut self) -> Fe {
         let l = &mut self.0;
         let mut c;
@@ -165,6 +169,12 @@ impl Fe {
         z_250_0.pow2k(5).mul(&z11)
     }
 
+    /// `self^((p - 5) / 8)`, the exponent of Ed25519's square roots.
+    pub(crate) fn pow_p58(&self) -> Fe {
+        let (z_250_0, _) = self.pow_2_250_minus_1();
+        z_250_0.pow2k(2).mul(self)
+    }
+
     /// Swaps `a` and `b` if `swap` is 1, without a branch.
     pub(crate) fn cswap(a: &mut Fe, b: &mut Fe, swap: u64) {
         let mask = 0u64.wrapping_sub(std::hint::black_box(swap));
@@ -211,5 +221,8 @@ mod tests {
         let x = Fe::from_bytes(&b);
         assert_eq!(x.mul(&x.invert()).to_bytes(), Fe::ONE.to_bytes());
         assert_eq!(Fe::ZERO.invert().to_bytes(), [0; 32]);
+        // r^8 = x^(p-5) = x^-4, so r^8 * x^4 = 1.
+        let r = x.pow_p58();
+        assert_eq!(r.pow2k(3).mul(&x.pow2k(2)).to_bytes(), Fe::ONE.to_bytes());
     }
 }

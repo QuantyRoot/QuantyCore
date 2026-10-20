@@ -19,6 +19,7 @@ mod tls_common;
 
 use quantycore::tls::crypto::aead::{Aead, AeadError};
 use quantycore::tls::crypto::chacha20poly1305::ChaCha20Poly1305;
+use quantycore::tls::crypto::ed25519;
 use quantycore::tls::crypto::gcm::AesGcm;
 use quantycore::tls::crypto::hkdf;
 use quantycore::tls::crypto::hmac::hmac;
@@ -385,4 +386,41 @@ fn wycheproof_x25519() {
     }
     eprintln!("X25519: {n} cases, {zero} with a zero secret");
     assert!(n >= 500 && zero >= 20, "Wycheproof X25519 incomplete");
+}
+
+/// Signatures with S at or above the group order, non-canonical point
+/// encodings, and points of small order, next to valid ones.
+#[test]
+fn wycheproof_ed25519() {
+    let Some(doc) = wycheproof("ed25519_test.json") else {
+        return;
+    };
+    let (mut valid, mut invalid) = (0, 0);
+    for group in doc.list("testGroups") {
+        let pk: [u8; 32] = group
+            .get("publicKey")
+            .unwrap()
+            .hex("pk")
+            .try_into()
+            .unwrap();
+        for t in group.list("tests") {
+            let ok = ed25519::verify(&pk, &t.hex("msg"), &t.hex("sig"));
+            match t.str("result") {
+                "valid" => {
+                    assert!(ok, "tcId {} rejected", t.num("tcId"));
+                    valid += 1;
+                }
+                "invalid" => {
+                    assert!(!ok, "tcId {} accepted", t.num("tcId"));
+                    invalid += 1;
+                }
+                r => panic!("result {r}"),
+            }
+        }
+    }
+    eprintln!("Ed25519: {valid} valid, {invalid} invalid");
+    assert!(
+        valid >= 80 && invalid >= 60,
+        "Wycheproof Ed25519 incomplete"
+    );
 }

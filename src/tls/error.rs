@@ -86,6 +86,9 @@ impl Error {
     pub(crate) fn unexpected(reason: &'static str) -> Error {
         Error::new(alert::UNEXPECTED_MESSAGE, reason)
     }
+    pub(crate) fn handshake_failure(reason: &'static str) -> Error {
+        Error::new(alert::HANDSHAKE_FAILURE, reason)
+    }
     pub(crate) fn internal(reason: &'static str) -> Error {
         Error::new(alert::INTERNAL_ERROR, reason)
     }
