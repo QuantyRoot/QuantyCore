@@ -22,6 +22,7 @@ UNIT = ["--lib"]
 VECTORS = ["--release", "--test", "tls_vectors"]
 TIMING = ["--release", "--test", "tls_timing"]
 LIMBO = ["--release", "--test", "tls_limbo"]
+FUZZ = ["--release", "--test", "tls_fuzz"]
 
 # name, file, text to find (exactly once), replacement, cargo test args,
 # test filter, environment the test needs
@@ -739,6 +740,36 @@ MUTANTS = [
         "&md.to_mont(&r_inv)",
         "&md.to_mont(&r)",
         VECTORS, "wycheproof_rsa_pkcs1_sign", ["QUANTY_WYCHEPROOF"],
+    ),
+    (
+        "fuzz: a length prefix read without its bounds check",
+        "src/tls/codec.rs",
+        "        if n > self.buf.len() {\n            return None;\n        }\n        let (a, b) = self.buf.split_at(n);",
+        "        let (a, b) = self.buf.split_at(n);",
+        FUZZ, "fuzz_handshake_messages", [],
+    ),
+    (
+        "fuzz: a DER length trusted",
+        "src/tls/x509/der.rs",
+        '        let whole = b.get(..end).ok_or(DerError("truncated value"))?;',
+        "        let whole = &b[..end];",
+        FUZZ, "fuzz_der_and_x509", [],
+    ),
+    (
+        "fuzz: a server trusts the record length",
+        "src/tls/record.rs",
+        "        if self.buf.len() < 5 + len {\n            return Ok(None);\n        }",
+        "",
+        FUZZ, "fuzz_server_connection", [],
+    ),
+    (
+        "fuzz: a client indexes a key share it did not check",
+        "src/tls/kx.rs",
+        """                let p: [u8; 32] = peer
+                    .try_into()
+                    .map_err(|_| Error::illegal("X25519 share is not 32 bytes"))?;""",
+        """                let p: [u8; 32] = peer[..32].try_into().unwrap();""",
+        FUZZ, "fuzz_client_connection", [],
     ),
 ]
 

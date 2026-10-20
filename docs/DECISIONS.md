@@ -21,6 +21,7 @@ through and add a new entry, never silently edit history.
 - [ADR-024](#adr-024-x509-validation-like-webpki-not-like-a-browser) X.509 validation like webpki, not like a browser
 - [ADR-025](#adr-025-x509-measured-against-x509-limbo-and-expired-roots-refused) X.509 measured against x509-limbo, and expired roots refused
 - [ADR-026](#adr-026-rsa-without-crt-and-without-key-generation) RSA without CRT and without key generation
+- [ADR-027](#adr-027-a-fuzzer-of-our-own-structure-aware-and-checked-by-mutants) A fuzzer of our own, structure aware and checked by mutants
 
 ## ADR-001: Nothing outside the standard library, and QuantyRoot is not outside
 
@@ -668,3 +669,34 @@ and signs with PSS (TLS 1.3 CertificateVerify) and PKCS#1 v1.5
 generation suite reproduced byte for byte, x509-limbo's RSA chains, the
 timing test on RSA-2048 signing, and handshakes with RSA certificates
 against OpenSSL and Go.
+
+## ADR-027: A fuzzer of our own, structure aware and checked by mutants
+
+`tests/tls_fuzz.rs` fuzzes the DER and X.509 parsers, PEM, private keys,
+every handshake message and extension parser, and whole client and
+server connections fed in pieces of random size. Inputs start from real
+ones and are mutated; the property is that nothing panics. Each case is
+derived from a seed and its number, so a failure prints both and
+replays exactly. CI runs 200,000 cases per target with a new seed each
+run.
+
+**Not cargo-fuzz or libFuzzer:** both are dependencies from outside
+(ADR-001), and coverage guidance needs instrumentation this crate does
+not have. Without coverage, the fuzzer has to know the format instead:
+it finds length prefixes that match their content and mutates behind
+them, and it mutates inside single extensions and re-encodes the
+message, because random bytes almost never get past TLS's nested
+lengths.
+
+**Checked like every other test,** by breaking the code: four mutants
+at four depths (a length read without its bounds check, a DER length
+trusted, a record length trusted, an X25519 share indexed without a
+length check) must each be found. The first version of the fuzzer
+missed the deepest one for two reasons that only the mutant revealed:
+plain byte mutation never kept a key share and its length consistent,
+and the client target replayed a server flight recorded for another
+client, so every case ended at the session id check.
+
+**Cost:** without coverage feedback, paths behind several consistent
+checks are reached rarely; the structure aware mutations reduce that,
+they do not remove it.
