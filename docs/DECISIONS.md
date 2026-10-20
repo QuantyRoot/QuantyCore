@@ -23,6 +23,7 @@ through and add a new entry, never silently edit history.
 - [ADR-026](#adr-026-rsa-without-crt-and-without-key-generation) RSA without CRT and without key generation
 - [ADR-027](#adr-027-a-fuzzer-of-our-own-structure-aware-and-checked-by-mutants) A fuzzer of our own, structure aware and checked by mutants
 - [ADR-032](#adr-032-apparmor-is-written-here) AppArmor is written here
+- [ADR-033](#adr-033-the-profile-language-is-read-the-way-flex-and-bison-read-it) The profile language is read the way flex and bison read it
 
 ## ADR-001: Nothing outside the standard library, and QuantyRoot is not outside
 
@@ -915,3 +916,60 @@ an older `apparmor_parser`, such as Ubuntu 24.04 with 4.0.1, may refuse a
 profile that uses 5.0 syntax and is accepted here. Until all of the above
 runs in CI and someone who did not write it has reviewed it, every public
 text calls it unreviewed (ADR-002).
+
+## ADR-033: The profile language is read the way flex and bison read it
+
+Upstream does not define the profile language in a document precise
+enough to implement from. `apparmor.d(5)` describes it; the flex scanner
+and the bison grammar of `apparmor_parser` decide it, down to which of
+two overlapping patterns wins. So the lexer here (`lexer.rs`) is upstream's
+rule table, in upstream's order and with upstream's thirty start
+conditions, run by a small scanner (`scan.rs`) with flex's semantics:
+longest match among the rules active in the current condition, the
+earlier rule on a tie, trailing context counted for the length but not
+consumed. The patterns are written in flex notation so that they can be
+compared with upstream's line by line. Quirks come along on purpose: the
+word `open` is the same token as `{`, a file whose last line is a comment
+without a newline is an error, and `include` must be followed by a blank.
+
+**The parser follows the bison grammar's productions.** The grammar has
+no conflicts, so it accepts exactly the language its productions
+describe, and a recursive descent parser that follows them accepts the
+same. Checks upstream makes inside grammar actions (permission strings,
+names, values) live in a separate semantic pass, so the parser is only
+the grammar. The one thing the grammar does to the lexer is kept: which
+includes have been read is recorded per profile block, swapped right
+after a profile's `{` and right after its `}`, and the parser tells the
+lexer at exactly those points without reading further ahead.
+
+**Limits upstream does not have,** because input is treated as hostile:
+
+- Profiles, blocks and conditionals nest at most 1024 deep, held on an
+  explicit stack. Upstream's bison stack gives out at a few thousand;
+  its own suite nests a hundred.
+- Parentheses in conditions nest at most 128 deep; expressions are the
+  one place parsed by recursion.
+- Includes nest at most 64 deep, a parse reads at most 20,000 files and
+  64 MiB, and one file at most 16 MiB. Upstream stops a cycle of
+  includes only through its include record, which a path spelled two
+  ways defeats.
+- Matching one token is linear in the bytes looked at.
+
+**Upstream is read for behaviour, not translated.** `apparmor_parser` is
+GPL-2.0 and this crate is Apache-2.0. The token patterns, keyword tables
+and limits are facts about the language and are taken as such; the code
+that implements them is written here from what upstream does, with its
+own structure, and no upstream source or comment is copied into it. The
+test suites are fetched in CI and read as data, as the TLS suites are.
+
+**Checked by:** upstream's `simple_tests`, all 73,737 cases at the pinned
+commit including the ones upstream generates (`tests/apparmor_simple.rs`).
+Every case upstream accepts parses here. Cases upstream refuses for
+reasons beyond the grammar are counted as pending until the stage that
+refuses them exists, against a ceiling in the test that only goes down
+and ends at zero. Cases upstream marks as known wrong (TODO) are expected
+to behave as upstream behaves, not as it would like to.
+
+**The cost:** a lexer that reproduces upstream's quirks instead of a
+cleaner grammar, and one that has to follow every change upstream makes
+to its scanner.
