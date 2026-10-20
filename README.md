@@ -27,10 +27,18 @@ Planned means no code exists yet.
 
 ## TLS
 
-TLS 1.3 will be implemented here, primitives included. It is not written
-yet, and when it is, it will be described as unreviewed until the
-conditions in [ADR-003](docs/DECISIONS.md#adr-003-tls-is-written-here) are
-met. Do not rely on it for anything that matters before then.
+TLS is implemented here under `quantycore::tls`, primitives included:
+TLS 1.3 client and server, TLS 1.2 as an opt-in fallback, the hybrid
+X25519MLKEM768 key exchange by default, and X.509 validation, issuance
+and certificate requests. The scope is in
+[ADR-020](docs/DECISIONS.md#adr-020-tls-scope-widened-to-a-complete-implementation),
+the decisions behind it in ADR-021 to ADR-030.
+
+It is checked against the published vector suites, OpenSSL and Go, a
+timing test, a fuzzer and deliberately broken code, but nobody else has
+reviewed it yet. It is unreviewed until the conditions in
+[ADR-003](docs/DECISIONS.md#adr-003-tls-is-written-here) are met. Do not
+rely on it for anything that matters before then.
 
 ## Rules
 
