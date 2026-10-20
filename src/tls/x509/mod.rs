@@ -22,7 +22,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The signature schemes accepted in CertificateVerify, best first.
 pub(crate) fn supported_schemes() -> Vec<u16> {
-    vec![scheme::ED25519]
+    vec![
+        scheme::ECDSA_SECP256R1_SHA256,
+        scheme::ED25519,
+        scheme::ECDSA_SECP384R1_SHA384,
+    ]
 }
 
 /// Path validation against a root store, as the handshake uses it.

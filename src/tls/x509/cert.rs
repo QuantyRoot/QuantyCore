@@ -239,9 +239,30 @@ impl Certificate {
                     if names.is_empty() {
                         return Err(DerError("empty SubjectAltName"));
                     }
+                    for n in &names {
+                        match n {
+                            GeneralName::Dns(d) if !super::name::valid_dns(d, true) => {
+                                return Err(DerError("invalid dNSName in SubjectAltName"))
+                            }
+                            GeneralName::Ip(a) if a.len() != 4 && a.len() != 16 => {
+                                return Err(DerError("invalid iPAddress in SubjectAltName"))
+                            }
+                            _ => {}
+                        }
+                    }
+                    // RFC 5280 4.2.1.6: with an empty subject the SAN
+                    // carries the identity and must be critical.
+                    if !critical && self.subject == [0x30, 0x00] {
+                        return Err(DerError(
+                            "SubjectAltName not critical with an empty subject",
+                        ));
+                    }
                     self.san = Some(names);
                 }
                 oid::NAME_CONSTRAINTS => {
+                    if !critical {
+                        return Err(DerError("NameConstraints not critical"));
+                    }
                     let mut s = v.sequence()?;
                     let mut nc = NameConstraints::default();
                     if let Some(p) = s.optional(tag::context_constructed(0))? {
@@ -255,6 +276,12 @@ impl Certificate {
                         return Err(DerError("empty NameConstraints"));
                     }
                     self.name_constraints = Some(nc);
+                }
+                oid::SUBJECT_KEY_ID | oid::AUTHORITY_KEY_ID if critical => {
+                    return Err(DerError("key identifier marked critical"))
+                }
+                oid::POLICY_CONSTRAINTS if !critical => {
+                    return Err(DerError("PolicyConstraints not critical"))
                 }
                 oid::SUBJECT_KEY_ID => self.ski = Some(v.expect(tag::OCTET_STRING)?.to_vec()),
                 oid::AUTHORITY_KEY_ID => {
@@ -358,6 +385,13 @@ fn subtrees(data: &[u8]) -> R<Vec<GeneralName>> {
     while !d.is_empty() {
         let mut st = d.sequence()?;
         let base = general_name(&mut st)?;
+        // A dNSName constraint is a host name or empty; the leading dot
+        // form belongs to URI constraints.
+        if let GeneralName::Dns(n) = &base {
+            if !n.is_empty() && !super::name::valid_dns(n, false) {
+                return Err(DerError("invalid dNSName constraint"));
+            }
+        }
         // minimum and maximum: RFC 5280 requires the defaults, which DER
         // leaves out.
         if !st.is_empty() {

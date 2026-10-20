@@ -19,12 +19,14 @@ mod tls_common;
 
 use quantycore::tls::crypto::aead::{Aead, AeadError};
 use quantycore::tls::crypto::chacha20poly1305::ChaCha20Poly1305;
+use quantycore::tls::crypto::ec::{self, Curve};
 use quantycore::tls::crypto::ed25519;
 use quantycore::tls::crypto::gcm::AesGcm;
 use quantycore::tls::crypto::hkdf;
 use quantycore::tls::crypto::hmac::hmac;
 use quantycore::tls::crypto::sha2::HashAlg;
 use quantycore::tls::crypto::x25519;
+use quantycore::tls::x509::der::ecdsa_signature;
 use tls_common::{load, rsp, suite, Json};
 
 fn acvp(name: &str) -> Option<Json> {
@@ -423,4 +425,162 @@ fn wycheproof_ed25519() {
         valid >= 80 && invalid >= 60,
         "Wycheproof Ed25519 incomplete"
     );
+}
+
+fn curve_of(name: &str) -> Option<Curve> {
+    match name {
+        "secp256r1" | "P-256" => Some(Curve::P256),
+        "secp384r1" | "P-384" => Some(Curve::P384),
+        _ => None,
+    }
+}
+
+fn hash_of(name: &str) -> Option<HashAlg> {
+    match name {
+        "SHA-256" => Some(HashAlg::Sha256),
+        "SHA-384" => Some(HashAlg::Sha384),
+        "SHA-512" => Some(HashAlg::Sha512),
+        _ => None,
+    }
+}
+
+/// Points on the twist, at infinity, with coordinates at or above p, and
+/// compressed points, which are refused here even where Wycheproof would
+/// accept them because TLS 1.3 never sends them.
+#[test]
+fn wycheproof_ecdh() {
+    for file in [
+        "ecdh_secp256r1_ecpoint_test.json",
+        "ecdh_secp384r1_ecpoint_test.json",
+    ] {
+        let Some(doc) = wycheproof(file) else {
+            return;
+        };
+        let (mut valid, mut refused) = (0, 0);
+        for group in doc.list("testGroups") {
+            let curve = curve_of(group.str("curve")).unwrap();
+            for t in group.list("tests") {
+                let id = t.num("tcId");
+                let d = t.hex("private");
+                let d = &d[d.len().saturating_sub(curve.size())..];
+                let mut padded = vec![0u8; curve.size() - d.len()];
+                padded.extend_from_slice(d);
+                let k = ec::SecretKey::from_bytes(curve, &padded).unwrap();
+                let got = k.diffie_hellman(&t.hex("public"));
+                match (t.str("result"), got) {
+                    ("valid", Some(s)) => {
+                        assert_eq!(s.expose(), &t.hex("shared")[..], "{file} {id}");
+                        valid += 1;
+                    }
+                    ("valid", None) => panic!("{file} {id}: valid point refused"),
+                    ("invalid", Some(_)) => panic!("{file} {id}: invalid point accepted"),
+                    ("acceptable", Some(s)) => {
+                        assert_eq!(s.expose(), &t.hex("shared")[..], "{file} {id}")
+                    }
+                    (_, None) => refused += 1,
+                    (r, _) => panic!("result {r}"),
+                }
+            }
+        }
+        eprintln!("{file}: {valid} valid, {refused} refused");
+        assert!(valid >= 300 && refused >= 15, "{file} incomplete");
+    }
+}
+
+#[test]
+fn wycheproof_ecdsa() {
+    let files = [
+        ("ecdsa_secp256r1_sha256_test.json", false),
+        ("ecdsa_secp256r1_sha256_p1363_test.json", true),
+        ("ecdsa_secp256r1_sha512_test.json", false),
+        ("ecdsa_secp384r1_sha384_test.json", false),
+        ("ecdsa_secp384r1_sha384_p1363_test.json", true),
+        ("ecdsa_secp384r1_sha512_test.json", false),
+        ("ecdsa_secp384r1_sha256_test.json", false),
+    ];
+    for (file, p1363) in files {
+        let Some(doc) = wycheproof(file) else {
+            return;
+        };
+        let (mut valid, mut invalid) = (0, 0);
+        for group in doc.list("testGroups") {
+            let key = group.get("publicKey").unwrap();
+            let curve = curve_of(key.str("curve")).unwrap();
+            let hash = hash_of(group.str("sha")).unwrap();
+            let q = key.hex("uncompressed");
+            for t in group.list("tests") {
+                let sig = t.hex("sig");
+                let h = hash.digest(&t.hex("msg"));
+                let ok = if p1363 {
+                    sig.len() == 2 * curve.size()
+                        && ec::verify_prehashed(
+                            curve,
+                            &q,
+                            &h,
+                            &sig[..curve.size()],
+                            &sig[curve.size()..],
+                        )
+                } else {
+                    ecdsa_signature(&sig)
+                        .is_some_and(|(r, s)| ec::verify_prehashed(curve, &q, &h, r, s))
+                };
+                let id = t.num("tcId");
+                match t.str("result") {
+                    "valid" => {
+                        assert!(ok, "{file} {id} rejected");
+                        valid += 1;
+                    }
+                    "invalid" => {
+                        assert!(!ok, "{file} {id} accepted");
+                        invalid += 1;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        eprintln!("{file}: {valid} valid, {invalid} invalid");
+        assert!(valid >= 1 && invalid >= 1, "{file} incomplete");
+    }
+}
+
+/// NIST's SigVer file: per curve and hash, signatures that verify and
+/// signatures broken in the message, the key, r or s.
+#[test]
+fn cavp_ecdsa_sigver() {
+    let Some(root) = suite("QUANTY_CAVP") else {
+        return;
+    };
+    let mut n = 0;
+    for r in rsp(&root.join("ecdsa/186-4ecdsatestvectors/SigVer.rsp")) {
+        let section = &r.params[0].0;
+        let mut parts = section.split(',');
+        let (Some(curve), Some(hash)) = (
+            parts.next().and_then(curve_of),
+            parts.next().and_then(hash_of),
+        ) else {
+            continue;
+        };
+        let Some(result) = r.get("Result") else {
+            continue;
+        };
+        let mut q = vec![4u8];
+        let pad = |v: Vec<u8>| {
+            let mut out = vec![0u8; curve.size() - v.len()];
+            out.extend(v);
+            out
+        };
+        q.extend(pad(r.hex("Qx")));
+        q.extend(pad(r.hex("Qy")));
+        let h = hash.digest(&r.hex("Msg"));
+        let ok = ec::verify_prehashed(curve, &q, &h, &r.hex("R"), &r.hex("S"));
+        assert_eq!(
+            ok,
+            result.starts_with('P'),
+            "{section} {:?}",
+            r.get("Msg").map(|m| &m[..16])
+        );
+        n += 1;
+    }
+    eprintln!("CAVP ECDSA SigVer: {n} cases");
+    assert!(n >= 90, "SigVer incomplete");
 }

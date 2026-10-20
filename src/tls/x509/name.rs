@@ -27,8 +27,8 @@ impl ServerName {
     }
 }
 
-/// A host name of labels of letters, digits, hyphens and underscores,
-/// each 1 to 63 bytes and not starting or ending with a hyphen. With
+/// A host name of labels of letters, digits and hyphens (RFC 5280
+/// 4.2.1.6 refers to RFC 1034's preferred syntax), each 1 to 63 bytes and not starting or ending with a hyphen. With
 /// `wildcard`, the first label may be exactly `*`.
 pub fn valid_dns(s: &str, wildcard: bool) -> bool {
     if s.is_empty() || s.len() > 253 {
@@ -48,8 +48,7 @@ pub fn valid_dns(s: &str, wildcard: bool) -> bool {
                 && l.len() <= 63
                 && !l.starts_with('-')
                 && !l.ends_with('-')
-                && l.bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'))
+                && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
     })
 }
 

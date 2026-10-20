@@ -391,6 +391,10 @@ fn verify_openssl_chain() {
 
 /// A certificate assembled by hand, to break rules the builder keeps.
 fn raw_cert(exts: &[u8], outer_alg: Option<&[u8]>) -> Vec<u8> {
+    raw_cert_serial(exts, outer_alg, &[1])
+}
+
+fn raw_cert_serial(exts: &[u8], outer_alg: Option<&[u8]>, serial: &[u8]) -> Vec<u8> {
     use super::der::{self, tag};
     let k = key(1);
     let (alg, _) = k.sign_x509(b"");
@@ -400,7 +404,7 @@ fn raw_cert(exts: &[u8], outer_alg: Option<&[u8]>) -> Vec<u8> {
         tag::context_constructed(0),
         &der::wrap(tag::INTEGER, &[2]),
     );
-    der::write(&mut tbs, tag::INTEGER, &[1]);
+    der::write(&mut tbs, tag::INTEGER, serial);
     tbs.extend_from_slice(&alg);
     tbs.extend_from_slice(&super::build::name("x"));
     let mut v = Vec::new();
@@ -510,4 +514,37 @@ fn wide_search_hits_the_signature_budget() {
     }
     let r = verify_chain(&p.roots(), &chain, None, Usage::Server, NOW);
     assert_eq!(r.unwrap_err(), CertError::TooComplex);
+}
+
+#[test]
+fn serial_numbers_must_be_positive_and_short() {
+    use super::cert::oid;
+    use super::der::{self, tag};
+    let san = ext(
+        oid::SUBJECT_ALT_NAME,
+        false,
+        &der::wrap(tag::SEQUENCE, &der::wrap(0x82, b"a.test")),
+    );
+    let check = |serial: &[u8]| {
+        let c = raw_cert_serial(&san, None, serial);
+        verify_chain(&RootStore::new(), &[c], None, Usage::Server, 1_900_000_000)
+    };
+    assert_eq!(
+        check(&[0]).unwrap_err(),
+        CertError::Malformed("serial number")
+    );
+    assert_eq!(
+        check(&[0xff]).unwrap_err(),
+        CertError::Malformed("serial number")
+    );
+    assert_eq!(
+        check(&[0x7f; 21]).unwrap_err(),
+        CertError::Malformed("serial number")
+    );
+    // Twenty octets, and twenty with a sign byte in front, are fine; the
+    // chain then fails for want of a root, which is later.
+    assert_eq!(check(&[0x7f; 20]).unwrap_err(), CertError::UnknownIssuer);
+    let mut signed = vec![0];
+    signed.extend_from_slice(&[0x80; 20]);
+    assert_eq!(check(&signed).unwrap_err(), CertError::UnknownIssuer);
 }

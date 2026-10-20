@@ -282,3 +282,68 @@ fn ed25519_sign() {
         )
     });
 }
+
+#[test]
+#[ignore]
+fn p256_ecdh_scalar() {
+    use quantycore::tls::crypto::ec::{Curve, SecretKey};
+    let peer = SecretKey::generate(Curve::P256).unwrap().public_key();
+    // The fixed class is the scalar 1, the smallest valid one.
+    let mut one = [0u8; 32];
+    one[31] = 1;
+    check("P-256 ECDH scalar", || {
+        measure(
+            samples(2_000),
+            1,
+            |r| {
+                SecretKey::from_bytes(
+                    Curve::P256,
+                    &if r {
+                        SecretKey::generate(Curve::P256)
+                            .unwrap()
+                            .to_bytes()
+                            .try_into()
+                            .unwrap()
+                    } else {
+                        one
+                    },
+                )
+                .unwrap()
+            },
+            |k| {
+                black_box(k.diffie_hellman(black_box(&peer)));
+            },
+        )
+    });
+}
+
+#[test]
+#[ignore]
+fn p384_ecdsa_sign() {
+    use quantycore::tls::crypto::ec::{Curve, SecretKey};
+    use quantycore::tls::crypto::sha2::HashAlg;
+    let mut one = [0u8; 48];
+    one[47] = 1;
+    let h = HashAlg::Sha384.digest(b"message");
+    check("P-384 ECDSA signing key", || {
+        measure(
+            samples(1_000),
+            1,
+            |r| {
+                let d: [u8; 48] = if r {
+                    SecretKey::generate(Curve::P384)
+                        .unwrap()
+                        .to_bytes()
+                        .try_into()
+                        .unwrap()
+                } else {
+                    one
+                };
+                SecretKey::from_bytes(Curve::P384, &d).unwrap()
+            },
+            |k| {
+                black_box(k.sign_prehashed(black_box(&h), HashAlg::Sha384));
+            },
+        )
+    });
+}

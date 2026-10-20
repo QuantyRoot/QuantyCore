@@ -508,8 +508,9 @@ fn server_refuses_a_broken_client_hello() {
             alert::HANDSHAKE_FAILURE,
             Box::new(|ch| {
                 for e in ch.extensions.iter_mut() {
+                    // secp521r1, which is not built.
                     if e.typ == ext::SUPPORTED_GROUPS {
-                        e.data = vec![0, 2, 0, group::SECP256R1 as u8];
+                        e.data = vec![0, 2, 0, 0x19];
                     }
                     if e.typ == ext::KEY_SHARE {
                         e.data = vec![0, 0];
@@ -579,4 +580,34 @@ fn a_requested_key_update_is_answered() {
     s.write(b"new key").unwrap();
     pump(&mut c, &mut s, usize::MAX).unwrap();
     assert_eq!(c.take_plaintext(), b"new key");
+}
+
+#[test]
+fn hello_retry_request_to_a_group_the_server_prefers() {
+    use super::msgs::group;
+    let mut p = pair();
+    p.server.groups = vec![group::SECP256R1];
+    let (mut c, mut s) = connect(p.client, p.server);
+    assert!(!c.is_handshaking());
+    c.write(b"after retry").unwrap();
+    pump(&mut c, &mut s, usize::MAX).unwrap();
+    assert_eq!(s.take_plaintext(), b"after retry");
+}
+
+#[test]
+fn every_group_and_suite() {
+    use super::msgs::group;
+    use super::suites::ALL_TLS13;
+    for g in [group::X25519, group::SECP256R1, group::SECP384R1] {
+        for suite in ALL_TLS13 {
+            let mut p = pair();
+            p.client.groups = vec![g];
+            p.client.suites = vec![suite];
+            let (mut c, mut s) = connect(p.client, p.server);
+            assert_eq!(c.cipher_suite(), Some(suite.id));
+            s.write(b"x").unwrap();
+            pump(&mut c, &mut s, usize::MAX).unwrap();
+            assert_eq!(c.take_plaintext(), b"x");
+        }
+    }
 }

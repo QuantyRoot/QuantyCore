@@ -5,6 +5,7 @@ pub mod aead;
 pub mod aes;
 pub mod chacha20poly1305;
 pub mod ct;
+pub mod ec;
 pub mod ed25519;
 pub(crate) mod field25519;
 pub mod gcm;

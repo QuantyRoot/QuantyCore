@@ -1,13 +1,13 @@
 #!/bin/sh
 # Checks out the vector suites the TLS tests read into the directory given
-# as $1: ACVP and Wycheproof at the commits pinned in ACVP_COMMIT and
-# WYCHEPROOF_COMMIT, and the CAVP zip files, which have no version, pinned
+# as $1: ACVP, Wycheproof and x509-limbo at the commits pinned in
+# ACVP_COMMIT, WYCHEPROOF_COMMIT and LIMBO_COMMIT, and the CAVP zip files, which have no version, pinned
 # by their SHA-256 below. ACVP is large, so only the algorithm directories
 # in use are checked out.
 set -eu
 
 dest=$1
-: "${ACVP_COMMIT:?}" "${WYCHEPROOF_COMMIT:?}"
+: "${ACVP_COMMIT:?}" "${WYCHEPROOF_COMMIT:?}" "${LIMBO_COMMIT:?}"
 
 fetch() {
     dir=$dest/$1
@@ -26,6 +26,7 @@ fetch acvp https://github.com/usnistgov/ACVP-Server "$ACVP_COMMIT" \
      /gen-val/json-files/HMAC-SHA2-384-2.0/ /gen-val/json-files/HMAC-SHA2-512-2.0/"
 fetch wycheproof https://github.com/C2SP/wycheproof "$WYCHEPROOF_COMMIT" \
     "/testvectors_v1/"
+fetch limbo https://github.com/C2SP/x509-limbo "$LIMBO_COMMIT" "/limbo.json"
 
 cavp() {
     mkdir -p "$dest/cavp/$1"
@@ -43,3 +44,6 @@ curl --fail --silent --show-error --retry 3 -o "$dest/rfc/rfc8448.txt" \
     https://www.rfc-editor.org/rfc/rfc8448.txt
 echo "6564d1376d1ec744fc7a9993da15ebc1b9be361908b166091f47ef605c537fba  $dest/rfc/rfc8448.txt" |
     sha256sum -c --quiet
+
+cavp ecdsa dss/186-4ecdsatestvectors.zip \
+    fe47cc92b4cee418236125c9ffbcd9bb01c8c34e74a4ba195d954bcb72824752

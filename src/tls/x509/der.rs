@@ -218,6 +218,18 @@ pub fn named_bits(v: &[u8]) -> Result<u16> {
     Ok(out)
 }
 
+/// An ECDSA signature `SEQUENCE { r INTEGER, s INTEGER }` in strict DER,
+/// as X.509 and TLS carry it. Returns r and s without sign bytes.
+pub fn ecdsa_signature(sig: &[u8]) -> Option<(&[u8], &[u8])> {
+    let mut outer = Der::new(sig);
+    let mut s = outer.sequence().ok()?;
+    outer.end().ok()?;
+    let r = s.unsigned().ok()?;
+    let v = s.unsigned().ok()?;
+    s.end().ok()?;
+    Some((r, v))
+}
+
 /// Writes a DER value: tag, minimal length, contents.
 pub fn write(out: &mut Vec<u8>, tag: u8, contents: &[u8]) {
     out.push(tag);

@@ -19,6 +19,7 @@ through and add a new entry, never silently edit history.
 - [ADR-022](#adr-022-the-tls-13-handshake-sans-io-compatibility-mode-stateless-tickets) The TLS 1.3 handshake: sans I/O, compatibility mode, stateless tickets
 - [ADR-023](#adr-023-constant-time-is-measured-not-assumed) Constant time is measured, not assumed
 - [ADR-024](#adr-024-x509-validation-like-webpki-not-like-a-browser) X.509 validation like webpki, not like a browser
+- [ADR-025](#adr-025-x509-measured-against-x509-limbo-and-expired-roots-refused) X.509 measured against x509-limbo, and expired roots refused
 
 ## ADR-001: Nothing outside the standard library, and QuantyRoot is not outside
 
@@ -585,3 +586,44 @@ root in the system store parsed; chains issued here verified by
 over real sockets against OpenSSL and Go in both directions, with and
 without client certificates. The x509-limbo suite follows once ECDSA
 exists, because nearly all of its chains are ECDSA or RSA.
+
+## ADR-025: X.509 measured against x509-limbo, and expired roots refused
+
+Supersedes one point of ADR-024: an expired (or not yet valid) root no
+longer anchors a chain. ADR-024 followed webpki in treating a trust
+anchor as information without a validity period; OpenSSL and Go both
+refuse an expired root, x509-limbo expects the refusal, and a root past
+its date is a root nobody maintains. Everything else in ADR-024 stands.
+
+With ECDSA built, the x509-limbo suite runs in CI against a pinned
+commit. Its first run found:
+
+- a real bug: when one branch of the path search reached the depth
+  limit, the whole search stopped, so valid chains that needed another
+  branch (the BetterTLS path building cases) were refused. Only an
+  exhausted budget ends the search now;
+- a real gap: no limit on name constraint comparisons, so a CA with
+  2048 constraints over a leaf with 2048 names cost millions of
+  comparisons. Now at most 250,000 per validation, as in webpki;
+- self-issued intermediates were checked against name constraints,
+  which RFC 5280 6.1.3(b) exempts;
+- RFC 5280 rules that were not enforced and now are: NameConstraints,
+  PolicyConstraints and a SubjectAltName under an empty subject must be
+  critical, key identifiers must not be, dNSName entries and constraints
+  must be valid host names (no underscores, no leading dot), serial
+  numbers must be positive and at most 20 octets, a leaf must not carry
+  keyCertSign or name constraints, and a CA must not have an empty
+  subject.
+
+The suite now agrees on every case it runs. What it does not run, and
+why, is listed in `tests/tls_limbo.rs`: CRL and ML-DSA cases, the cases
+limbo itself marks as pedantic CA/Browser Forum issuance rules, and the
+cases that configure a chain depth this API does not expose. Where this
+crate deliberately disagrees, each case is named there with its reason;
+in short, it is stricter about CA certificates as leaves and about email
+name constraints, and more lenient about missing key identifiers and the
+extensions of trust anchors, none of which affects what a chain proves.
+
+**Cost:** certificates with underscores in DNS names, which some
+private networks issue, are refused. The CA/Browser Forum has forbidden
+them in public certificates since 2019.

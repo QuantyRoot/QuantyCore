@@ -21,6 +21,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 UNIT = ["--lib"]
 VECTORS = ["--release", "--test", "tls_vectors"]
 TIMING = ["--release", "--test", "tls_timing"]
+LIMBO = ["--release", "--test", "tls_limbo"]
 
 # name, file, text to find (exactly once), replacement, cargo test args,
 # test filter, environment the test needs
@@ -633,6 +634,76 @@ MUTANTS = [
         '                _ if critical => return Err(DerError("unknown critical extension")),\n',
         "",
         UNIT, "parser_refuses_what_rfc_5280_forbids", [],
+    ),
+    (
+        "x509: expired roots still anchor",
+        "src/tls/x509/path.rs",
+        "            if self.now < a.not_before || self.now > a.not_after {",
+        "            if false {",
+        LIMBO, "limbo", ["QUANTY_LIMBO"],
+    ),
+    (
+        "x509: no limit on name constraint comparisons",
+        "src/tls/x509/path.rs",
+        "                if cost > left {",
+        "                if false {",
+        LIMBO, "limbo", ["QUANTY_LIMBO"],
+    ),
+    (
+        "x509: constraints applied to self-issued intermediates",
+        "src/tls/x509/path.rs",
+        "                if c.is_self_issued() {",
+        "                if false {",
+        LIMBO, "limbo", ["QUANTY_LIMBO"],
+    ),
+    (
+        "x509: a dead end aborts the whole path search",
+        "src/tls/x509/path.rs",
+        "                Err(_) if self.exhausted.get() => return Err(CertError::TooComplex),",
+        "                Err(CertError::TooComplex) => return Err(CertError::TooComplex),",
+        LIMBO, "limbo", ["QUANTY_LIMBO"],
+    ),
+    (
+        "x509: zero serial numbers accepted",
+        "src/tls/x509/path.rs",
+        "v.iter().all(|&b| b == 0)",
+        "v.is_empty()",
+        UNIT, "serial_numbers_must_be_positive_and_short", [],
+    ),
+    (
+        "ec: points off the curve accepted",
+        "src/tls/crypto/ec.rs",
+        "    if f.out_of_mont(&f.mul(&y, &y)) != f.out_of_mont(&rhs) {",
+        "    if false {",
+        UNIT, "ecdh_agrees_and_refuses_points_off_the_curve", [],
+    ),
+    (
+        "ec: one step of the complete addition wrong",
+        "src/tls/crypto/ec.rs",
+        "    t3 = f.sub(&t3, &t4);",
+        "    t3 = f.add(&t3, &t4);",
+        UNIT, "rfc_6979", [],
+    ),
+    (
+        "ec: scalar multiplication ignores the bits",
+        "src/tls/crypto/ec.rs",
+        "            r.cmove(&s, ((byte >> i) & 1) as u64);",
+        "            r.cmove(&s, 0);",
+        UNIT, "rfc_6979", [],
+    ),
+    (
+        "ecdsa: hash longer than the order taken from the right",
+        "src/tls/crypto/ec.rs",
+        "        b.copy_from_slice(&hash[..size]);",
+        "        b.copy_from_slice(&hash[hash.len() - size..]);",
+        VECTORS, "wycheproof_ecdsa", ["QUANTY_WYCHEPROOF"],
+    ),
+    (
+        "ecdsa: r and s not range checked",
+        "src/tls/crypto/ec.rs",
+        "    if !scalar_ok(c, &r) || !scalar_ok(c, &s) {",
+        "    if false {",
+        VECTORS, "wycheproof_ecdsa", ["QUANTY_WYCHEPROOF"],
     ),
 ]
 

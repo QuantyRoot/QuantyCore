@@ -74,6 +74,7 @@ jobs:
     env:
       ACVP_COMMIT: 975de31eb83d87039ec88934fdc47d8c312b892d
       WYCHEPROOF_COMMIT: 7a325932231bd7a724c791c8b0d65ea4d6d2f435
+      LIMBO_COMMIT: 554528a9b0c0d95e071f55de018326f0b65a8364
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.0
@@ -87,6 +88,11 @@ jobs:
           QUANTY_WYCHEPROOF: ${{ runner.temp }}/wycheproof/testvectors_v1
           QUANTY_CAVP: ${{ runner.temp }}/cavp
           QUANTY_ACVP_LDT: 1
+      - name: path validation against x509-limbo
+        run: cargo test --release --test tls_limbo -- --nocapture
+        env:
+          QUANTY_VECTORS_REQUIRED: 1
+          QUANTY_LIMBO: ${{ runner.temp }}/limbo/limbo.json
       - name: the handshake against the RFC 8448 traces
         run: cargo test --release --lib tls::rfc8448 -- --nocapture
         env:
@@ -99,6 +105,7 @@ jobs:
     env:
       ACVP_COMMIT: 975de31eb83d87039ec88934fdc47d8c312b892d
       WYCHEPROOF_COMMIT: 7a325932231bd7a724c791c8b0d65ea4d6d2f435
+      LIMBO_COMMIT: 554528a9b0c0d95e071f55de018326f0b65a8364
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.0
@@ -112,6 +119,7 @@ jobs:
           QUANTY_WYCHEPROOF: ${{ runner.temp }}/wycheproof/testvectors_v1
           QUANTY_CAVP: ${{ runner.temp }}/cavp
           QUANTY_RFC8448: ${{ runner.temp }}/rfc/rfc8448.txt
+          QUANTY_LIMBO: ${{ runner.temp }}/limbo/limbo.json
           QUANTY_ACVP_LDT: 1
 
   # Timing is noisy on shared runners; the test only fails when two runs

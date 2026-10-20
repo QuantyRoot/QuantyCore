@@ -71,6 +71,8 @@ impl Usage {
 #[derive(Clone, Debug)]
 pub struct TrustAnchor {
     subject: Vec<u8>,
+    not_before: i64,
+    not_after: i64,
     spki: Spki,
     constraints: Option<NameConstraints>,
 }
@@ -97,6 +99,8 @@ impl RootStore {
         let c = Certificate::parse(der).map_err(|e| CertError::Malformed(e.0))?;
         self.anchors.push(TrustAnchor {
             subject: c.subject,
+            not_before: c.not_before,
+            not_after: c.not_after,
             spki: c.spki,
             constraints: c.name_constraints,
         });
@@ -145,12 +149,17 @@ impl RootStore {
     }
 }
 
+/// Name constraint comparisons per validation. A CA with thousands of
+/// constraints over a leaf with thousands of names would otherwise cost
+/// millions of comparisons.
+const MAX_NAME_COMPARISONS: usize = 250_000;
+
 /// Paths deeper than this are refused; real ones have one or two
 /// intermediates.
 const MAX_INTERMEDIATES: usize = 6;
 /// Signature checks per validation, against a peer that sends many
 /// certificates with the same subject to make path building explode.
-const MAX_SIGNATURE_CHECKS: usize = 64;
+const MAX_SIGNATURE_CHECKS: usize = 100;
 
 struct Search<'a> {
     roots: &'a RootStore,
@@ -159,6 +168,8 @@ struct Search<'a> {
     usage: Usage,
     now: i64,
     budget: usize,
+    name_budget: std::cell::Cell<usize>,
+    exhausted: std::cell::Cell<bool>,
 }
 
 /// Validates `chain` (leaf first, as sent) for `name` at time `now` (Unix
@@ -179,11 +190,25 @@ pub fn verify_chain(
         return Err(CertError::CaAsEndEntity);
     }
     check_time(&leaf, now)?;
+    check_serial(&leaf)?;
     if leaf
         .key_usage
         .is_some_and(|ku| ku & key_usage::DIGITAL_SIGNATURE == 0)
     {
         return Err(CertError::KeyUsage);
+    }
+    // keyCertSign without cA is contradictory (RFC 5280 4.2.1.3), and
+    // name constraints belong in CA certificates only (4.2.1.10).
+    if leaf
+        .key_usage
+        .is_some_and(|ku| ku & key_usage::KEY_CERT_SIGN != 0)
+    {
+        return Err(CertError::KeyUsage);
+    }
+    if leaf.name_constraints.is_some() {
+        return Err(CertError::Malformed(
+            "name constraints in an end-entity certificate",
+        ));
     }
     if let Some(eku) = &leaf.eku {
         if !eku.iter().any(|e| e == usage.eku()) {
@@ -208,15 +233,31 @@ pub fn verify_chain(
         intermediates: chain[1..]
             .iter()
             .filter_map(|d| Certificate::parse(d).ok())
-            .take(32)
+            .take(64)
             .collect(),
         usage,
         now,
         budget: MAX_SIGNATURE_CHECKS,
+        name_budget: std::cell::Cell::new(MAX_NAME_COMPARISONS),
+        exhausted: std::cell::Cell::new(false),
     };
     let mut path = Vec::new();
     s.extend(&leaf, &mut path)?;
     Ok(key)
+}
+
+/// RFC 5280 4.1.2.2: positive and at most 20 octets.
+fn check_serial(c: &Certificate) -> Result<(), CertError> {
+    let s = &c.serial;
+    let v = if s.len() > 1 && s[0] == 0 {
+        &s[1..]
+    } else {
+        &s[..]
+    };
+    if s[0] & 0x80 != 0 || v.iter().all(|&b| b == 0) || v.len() > 20 {
+        return Err(CertError::Malformed("serial number"));
+    }
+    Ok(())
 }
 
 fn check_time(c: &Certificate, now: i64) -> Result<(), CertError> {
@@ -239,6 +280,17 @@ impl Search<'_> {
         for i in 0..self.roots.anchors.len() {
             let a = &self.roots.anchors[i];
             if a.subject != cert.issuer {
+                continue;
+            }
+            // Unlike webpki, an expired root anchors nothing, as with
+            // OpenSSL and Go: a root past its date is no longer
+            // maintained by anyone.
+            if self.now < a.not_before || self.now > a.not_after {
+                best = if self.now > a.not_after {
+                    CertError::Expired
+                } else {
+                    CertError::NotYetValid
+                };
                 continue;
             }
             match self.signed_by(cert, &a.spki) {
@@ -276,7 +328,9 @@ impl Search<'_> {
             path.push(i);
             match self.extend(&ca, path) {
                 Ok(()) => return Ok(()),
-                Err(CertError::TooComplex) => return Err(CertError::TooComplex),
+                // Only an exhausted budget ends the whole search; a branch
+                // that ran too deep is one dead end among others.
+                Err(_) if self.exhausted.get() => return Err(CertError::TooComplex),
                 Err(e) => best = e,
             }
             path.pop();
@@ -286,6 +340,7 @@ impl Search<'_> {
 
     fn signed_by(&mut self, cert: &Certificate, issuer: &Spki) -> Result<(), CertError> {
         if self.budget == 0 {
+            self.exhausted.set(true);
             return Err(CertError::TooComplex);
         }
         self.budget -= 1;
@@ -298,6 +353,10 @@ impl Search<'_> {
     fn check_ca(&self, ca: &Certificate, path: &[usize]) -> Result<(), CertError> {
         if ca.version != 3 {
             return Err(CertError::NotCa);
+        }
+        check_serial(ca)?;
+        if ca.subject == [0x30, 0x00] {
+            return Err(CertError::Malformed("CA with an empty subject"));
         }
         let Some((true, path_len)) = ca.ca else {
             return Err(CertError::NotCa);
@@ -338,17 +397,20 @@ impl Search<'_> {
         path: &[usize],
         anchor: Option<&NameConstraints>,
     ) -> Result<(), CertError> {
-        // Certificates below the anchor, leaf last.
+        // Certificates below the anchor, leaf last. Self-issued
+        // intermediates are exempt (RFC 5280 6.1.3(b)): a CA renewing its
+        // own key is not bound by its own constraints.
+        let empty: &[u8] = &[0x30, 0x00];
         let mut below: Vec<(&[GeneralName], &[u8], bool)> = path
             .iter()
             .rev()
             .map(|&i| {
                 let c = &self.intermediates[i];
-                (
-                    c.san.as_deref().unwrap_or(&[]),
-                    c.subject.as_slice(),
-                    !c.is_self_issued(),
-                )
+                if c.is_self_issued() {
+                    (&[][..], empty, false)
+                } else {
+                    (c.san.as_deref().unwrap_or(&[]), c.subject.as_slice(), true)
+                }
             })
             .collect();
         below.push((
@@ -359,7 +421,15 @@ impl Search<'_> {
         let apply = |nc: &NameConstraints,
                      certs: &[(&[GeneralName], &[u8], bool)]|
          -> Result<(), CertError> {
+            let per_name = nc.permitted.as_ref().map_or(0, |p| p.len()) + nc.excluded.len();
             for (san, subject, check_subject) in certs {
+                let cost = (san.len() + 1) * per_name;
+                let left = self.name_budget.get();
+                if cost > left {
+                    self.exhausted.set(true);
+                    return Err(CertError::TooComplex);
+                }
+                self.name_budget.set(left - cost);
                 check_constraints(
                     nc.permitted.as_deref(),
                     &nc.excluded,

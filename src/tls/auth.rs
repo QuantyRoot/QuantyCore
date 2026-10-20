@@ -1,10 +1,12 @@
 //! Signing and verifying the handshake, and the boundary to certificate
 //! validation.
 
+use super::crypto::ec::{self, Curve};
 use super::crypto::ed25519;
+use super::crypto::sha2::HashAlg;
 use super::error::{alert, Error};
 use super::x509::cert::{oid, Spki};
-use super::x509::der::Der;
+use super::x509::der::{ecdsa_signature, Der};
 use super::x509::CertError;
 
 pub mod scheme {
@@ -23,6 +25,8 @@ pub mod scheme {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PublicKey {
     Ed25519([u8; 32]),
+    /// An uncompressed point, checked to be on the curve.
+    Ec(Curve, Vec<u8>),
     /// Accepts every signature. Exists only in this crate's tests, for
     /// the RFC 8448 traces, whose RSA signatures come before RSA does.
     #[cfg(test)]
@@ -46,6 +50,17 @@ impl PublicKey {
                     .map_err(|_| CertError::Malformed("Ed25519 key length"))?;
                 Ok(PublicKey::Ed25519(k))
             }
+            oid::EC_PUBLIC_KEY => {
+                let curve = match spki.curve.as_deref() {
+                    Some(oid::P256) => Curve::P256,
+                    Some(oid::P384) => Curve::P384,
+                    _ => return Err(CertError::UnsupportedAlgorithm),
+                };
+                if !ec::is_valid_point(curve, &spki.key) {
+                    return Err(CertError::Malformed("EC public key not on the curve"));
+                }
+                Ok(PublicKey::Ec(curve, spki.key.clone()))
+            }
             _ => Err(CertError::UnsupportedAlgorithm),
         }
     }
@@ -60,6 +75,15 @@ impl PublicKey {
         let ok = match (self, id) {
             (PublicKey::Ed25519(k), oid::ED25519) if !has_params => ed25519::verify(k, tbs, sig),
             (_, oid::ED25519) => return Err(CertError::BadSignature),
+            (PublicKey::Ec(curve, q), id) if !has_params => {
+                let hash = match id {
+                    oid::ECDSA_SHA256 => HashAlg::Sha256,
+                    oid::ECDSA_SHA384 => HashAlg::Sha384,
+                    oid::ECDSA_SHA512 => HashAlg::Sha512,
+                    _ => return Err(CertError::UnsupportedAlgorithm),
+                };
+                ecdsa_verify(*curve, q, hash, tbs, sig)
+            }
             _ => return Err(CertError::UnsupportedAlgorithm),
         };
         if ok {
@@ -74,6 +98,8 @@ impl PublicKey {
     pub fn tls13_schemes(&self) -> &'static [u16] {
         match self {
             PublicKey::Ed25519(_) => &[scheme::ED25519],
+            PublicKey::Ec(Curve::P256, _) => &[scheme::ECDSA_SECP256R1_SHA256],
+            PublicKey::Ec(Curve::P384, _) => &[scheme::ECDSA_SECP384R1_SHA384],
             #[cfg(test)]
             PublicKey::AcceptAny => &[],
         }
@@ -82,6 +108,14 @@ impl PublicKey {
     pub fn verify(&self, sig_scheme: u16, msg: &[u8], sig: &[u8]) -> Result<(), Error> {
         let ok = match (self, sig_scheme) {
             (PublicKey::Ed25519(pk), scheme::ED25519) => ed25519::verify(pk, msg, sig),
+            // In TLS 1.3 the scheme fixes both curve and hash (RFC 8446
+            // 4.2.3).
+            (PublicKey::Ec(Curve::P256, q), scheme::ECDSA_SECP256R1_SHA256) => {
+                ecdsa_verify(Curve::P256, q, HashAlg::Sha256, msg, sig)
+            }
+            (PublicKey::Ec(Curve::P384, q), scheme::ECDSA_SECP384R1_SHA384) => {
+                ecdsa_verify(Curve::P384, q, HashAlg::Sha384, msg, sig)
+            }
             #[cfg(test)]
             (PublicKey::AcceptAny, _) => true,
             _ => return Err(Error::illegal("signature scheme does not fit the key")),
@@ -94,6 +128,13 @@ impl PublicKey {
                 "signature does not verify",
             ))
         }
+    }
+}
+
+fn ecdsa_verify(curve: Curve, q: &[u8], hash: HashAlg, msg: &[u8], sig: &[u8]) -> bool {
+    match ecdsa_signature(sig) {
+        Some((r, s)) => ec::verify_prehashed(curve, q, &hash.digest(msg), r, s),
+        None => false,
     }
 }
 
