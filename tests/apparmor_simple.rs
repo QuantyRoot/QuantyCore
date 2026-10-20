@@ -25,7 +25,7 @@ const TODO_INVERTED: bool = true;
 const DIFFERS_ON_PURPOSE: &[(&str, &str)] = &[];
 
 /// Refusals that later stages will add. Lowered with each stage.
-const MAX_PENDING: usize = 20_348;
+const MAX_PENDING: usize = 13_754;
 
 /// The suite at the pinned commit has 73737 cases; fewer means the
 /// checkout or the generation step went wrong.

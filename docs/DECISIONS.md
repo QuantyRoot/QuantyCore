@@ -24,6 +24,7 @@ through and add a new entry, never silently edit history.
 - [ADR-027](#adr-027-a-fuzzer-of-our-own-structure-aware-and-checked-by-mutants) A fuzzer of our own, structure aware and checked by mutants
 - [ADR-032](#adr-032-apparmor-is-written-here) AppArmor is written here
 - [ADR-033](#adr-033-the-profile-language-is-read-the-way-flex-and-bison-read-it) The profile language is read the way flex and bison read it
+- [ADR-034](#adr-034-variables-conditions-and-rule-semantics-follow-upstreams-order) Variables, conditions and rule semantics follow upstream's order
 
 ## ADR-001: Nothing outside the standard library, and QuantyRoot is not outside
 
@@ -973,3 +974,59 @@ to behave as upstream behaves, not as it would like to.
 **The cost:** a lexer that reproduces upstream's quirks instead of a
 cleaner grammar, and one that has to follow every change upstream makes
 to its scanner.
+
+## ADR-034: Variables, conditions and rule semantics follow upstream's order
+
+Upstream does part of its work while it parses and part afterwards, and
+some results depend on which comes first. `build.rs` does what upstream's
+grammar actions do, in file order: the preamble's variables are assigned
+and boolean expressions evaluated as they appear, prefixes are applied,
+permission strings become masks, named exec transitions take their slot
+in the profile's exec table, and the checks upstream makes at that point
+are made. `process.rs` does what upstream does to each profile after the
+file is parsed: implied rules, variable expansion, aliases, and merging
+identical file rules.
+
+**Behaviour kept although it looks wrong,** because a profile must mean
+the same under both compilers:
+
+- A set variable's expansion is computed once, the first time anything
+  needs it, and kept. A `+=` after that first use changes nothing that
+  comes later, and a variable that refers to `@{profile_name}` keeps the
+  name of the first profile that expanded it.
+- Both branches of an `if` are built and checked before one is chosen,
+  so an invalid rule in the branch not taken is still an error. Both
+  sides of `and` and `or` are evaluated.
+- A prefix in front of a `{ }` block replaces the mode of every file rule
+  in it, so `audit { deny /x r, }` is an audited allow. Only file, link
+  and change_profile rules survive such a block; capabilities, network
+  and other rules and hats inside it are dropped without a word.
+- Resource limits set inside an `if` branch are dropped when the branch
+  is merged into its profile.
+- Only the first entry in a profile's flags can set `debug` or
+  `interruptible`.
+
+Each of these is upstream's code as written at the pinned commit; none
+is documented. If upstream fixes one, the reference moves and so does
+this.
+
+**Limits upstream does not have:** expanding one variable may produce at
+most 65,536 values and 16 MiB, and variables may refer to each other at
+most 256 deep. Upstream's own suite contains variables that multiply
+until `apparmor_parser` dies of `std::bad_alloc`; here they are an
+error.
+
+**Real profiles as a measure** (`tests/apparmor_corpus.rs`): every
+profile in Ubuntu 24.04's and Debian 13's apparmor and apparmor-profiles
+packages, taken from the distributions' snapshot archives and pinned by
+SHA-256, upstream's own profiles at the pinned commit, and the default
+profiles of Docker (moby/profiles), containerd and CRI-O
+(containers/common). The container profiles are Go templates; a small Go
+program renders them with `text/template` at pinned commits, once with
+the host's tunables and abstractions available and once without, which
+is what each runtime does depending on the host. That is 435 profiles,
+all of which upstream accepts, and all of which must pass here.
+
+**Cost:** the quirks above have to be followed when upstream changes
+them, and a profile that relies on one of them behaves the same here
+rather than better.

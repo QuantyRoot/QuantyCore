@@ -182,19 +182,30 @@ jobs:
 
   # Upstream's own parser tests, at the commit ADR-032 names: every case
   # marked to pass must pass, and refusals still owed by stages not yet
-  # built are counted against a ceiling that only goes down.
-  apparmor-simple:
-    name: AppArmor against upstream's parser tests
+  # built are counted against a ceiling that only goes down. Then the
+  # real profiles of two distributions, upstream and three container
+  # runtimes (ADR-034).
+  apparmor-suites:
+    name: AppArmor against upstream's tests and real profiles
     runs-on: ubuntu-latest
     env:
       APPARMOR_COMMIT: 909affc32a13d14ae3a7ccf44d325ae63ce11baf
+      QUANTY_VECTORS_REQUIRED: 1
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
       - name: fetch upstream at a pinned commit
         run: tests/apparmor_fetch.sh "$RUNNER_TEMP/apparmor"
+      - name: fetch the profile corpus at pinned versions
+        run: tests/apparmor_fetch_corpus.sh "$RUNNER_TEMP/corpus" "$RUNNER_TEMP/apparmor"
       - name: simple_tests
         run: cargo test --release --test apparmor_simple -- --nocapture
         env:
-          QUANTY_VECTORS_REQUIRED: 1
           QUANTY_APPARMOR_TST: ${{ runner.temp }}/apparmor/parser/tst
+      - name: real profiles
+        run: cargo test --release --test apparmor_corpus -- --nocapture
+        env:
+          QUANTY_APPARMOR_CORPUS: ${{ runner.temp }}/corpus

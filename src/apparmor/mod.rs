@@ -6,10 +6,15 @@
 //! compiled profile grants what upstream's would grant.
 
 pub mod ast;
+pub(crate) mod build;
+pub(crate) mod eval;
 pub(crate) mod lexer;
+pub mod model;
 pub mod parser;
+pub(crate) mod process;
 pub(crate) mod scan;
 pub mod source;
+pub(crate) mod tables;
 
 pub use source::{Error, FsResolver, Location, MemResolver, Opened, Resolver, Span};
 
@@ -17,5 +22,14 @@ pub use source::{Error, FsResolver, Location, MemResolver, Opened, Resolver, Spa
 /// the policy out: parse it with its includes, and check it. An error is
 /// what upstream would refuse the file for.
 pub fn check(resolver: &mut dyn Resolver, name: &str, text: Vec<u8>) -> Result<(), Error> {
-    parser::parse(resolver, name, text).map(|_| ())
+    let parsed = parser::parse(resolver, name, text)?;
+    let mut b = build::Builder::new(&parsed.sources);
+    let mut policy = b.file(&parsed.file)?;
+    let mut p = process::Processor {
+        sources: &parsed.sources,
+        symtab: b.symtab,
+        aliases: b.aliases,
+    };
+    p.policy(&mut policy)?;
+    Ok(())
 }
