@@ -3,6 +3,7 @@ name = "quantycore"
 version = "0.0.0"
 edition = "2021"
 rust-version = "1.89"
+license = "Apache-2.0"
 description = "Shared foundations for Quanty projects"
 repository = "https://github.com/QuantyRoot/QuantyCore"
 publish = false

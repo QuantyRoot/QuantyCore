@@ -6,6 +6,7 @@ on the Rust standard library.
 
 [![CI](https://github.com/QuantyRoot/QuantyCore/actions/workflows/ci.yml/badge.svg)](https://github.com/QuantyRoot/QuantyCore/actions/workflows/ci.yml)
 ![Status](https://img.shields.io/badge/status-early-red)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Made by Elchi](https://img.shields.io/badge/made%20by-Elchi-8A2BE2)](https://github.com/Elchi-dev)
 
 ## Status
@@ -42,3 +43,9 @@ cargo test
 ```
 
 Rust 1.89 or newer.
+
+## License
+
+Apache License 2.0, see [LICENSE](LICENSE).
+
+QuantyCore is a project by Elchi Studios.

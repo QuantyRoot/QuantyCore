@@ -9,6 +9,7 @@ through and add a new entry, never silently edit history.
 - [ADR-002](#adr-002-honesty-rule-for-public-claims) Honesty rule for public claims
 - [ADR-003](#adr-003-tls-is-written-here) TLS is written here
 - [ADR-004](#adr-004-the-wire-protocols-live-here-in-one-crate) The wire protocols live here, in one crate
+- [ADR-005](#adr-005-apache-20) Apache 2.0
 
 ## ADR-001: Nothing outside the standard library, and QuantyRoot is not outside
 
@@ -182,3 +183,11 @@ but every commit it makes pins QuantyCore by revision, so a protocol fix
 is two commits in two repositories. That is accepted because the
 alternative, building the stack inside QuantyKube and moving it out once
 the runtime needs it, means moving it in the middle of the busiest weeks.
+
+## ADR-005: Apache 2.0
+
+QuantyCore is licensed under the Apache License 2.0, the same as
+QuantyKube; that project's ADR-007 gives the full reasoning. For a library
+the deciding point is simpler: it is meant to be used by Quanty projects
+and by anyone else, and Apache 2.0 is compatible with both the MIT license
+QuantyDB uses and the Apache 2.0 that QuantyKube uses.
