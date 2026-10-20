@@ -9,6 +9,7 @@
 
 use crate::hpack;
 use std::collections::{HashMap, VecDeque};
+use std::time::{Duration, Instant};
 
 pub const PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 
@@ -45,6 +46,7 @@ pub mod code {
     pub const REFUSED_STREAM: u32 = 0x7;
     pub const CANCEL: u32 = 0x8;
     pub const COMPRESSION_ERROR: u32 = 0x9;
+    pub const ENHANCE_YOUR_CALM: u32 = 0xb;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +66,38 @@ impl Default for Settings {
             initial_window_size: 1 << 20,
             max_frame_size: MIN_FRAME_SIZE,
             max_header_list_size: 1 << 16,
+        }
+    }
+}
+
+/// How much a peer may make this side do without doing work itself.
+/// Exceeding any of these ends the connection with ENHANCE_YOUR_CALM.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    /// Replies (PING and SETTINGS acks, RST_STREAM) allowed to wait in the
+    /// output between two [`Connection::take_output`] calls. A peer that
+    /// asks for more than that is not reading them (CVE-2019-9512,
+    /// CVE-2019-9515).
+    pub max_unsent_control: usize,
+    /// Frames in a row that give nothing to act on: PRIORITY, empty DATA,
+    /// empty CONTINUATION, acks, SETTINGS, unknown types (CVE-2019-9518).
+    pub max_empty_frames: u32,
+    /// Stream resets in a burst, whether the peer sent them or provoked
+    /// them with a stream error (CVE-2023-44487, CVE-2025-8671).
+    pub reset_burst: u32,
+    /// The time it takes to earn one reset back.
+    pub reset_refill: Duration,
+}
+
+impl Default for Limits {
+    /// nghttp2's numbers: 1000 unsent acks, and resets at 1000 in a burst
+    /// and 33 a second after that.
+    fn default() -> Self {
+        Limits {
+            max_unsent_control: 1000,
+            max_empty_frames: 1000,
+            reset_burst: 1000,
+            reset_refill: Duration::from_millis(30),
         }
     }
 }
@@ -144,6 +178,11 @@ pub struct Connection {
     closed: bool,
     client: bool,
     next_stream: u32,
+    limits: Limits,
+    unsent_control: usize,
+    empty_frames: u32,
+    resets_left: u32,
+    resets_at: Instant,
 }
 
 impl Connection {
@@ -185,6 +224,11 @@ impl Connection {
             closed: false,
             client,
             next_stream: 1,
+            limits: Limits::default(),
+            unsent_control: 0,
+            empty_frames: 0,
+            resets_left: Limits::default().reset_burst,
+            resets_at: Instant::now(),
         };
         if client {
             c.out.extend_from_slice(PREFACE);
@@ -211,7 +255,14 @@ impl Connection {
         c
     }
 
+    pub fn with_limits(mut self, limits: Limits) -> Self {
+        self.limits = limits;
+        self.resets_left = limits.reset_burst;
+        self
+    }
+
     pub fn take_output(&mut self) -> Vec<u8> {
+        self.unsent_control = 0;
         std::mem::take(&mut self.out)
     }
 
@@ -221,6 +272,20 @@ impl Connection {
 
     pub fn is_closed(&self) -> bool {
         self.closed
+    }
+
+    /// The peer has sent its preface and SETTINGS.
+    pub fn is_established(&self) -> bool {
+        self.seen_preface && self.seen_settings
+    }
+
+    /// False once the stream has ended both ways or was reset.
+    pub fn is_open(&self, stream: u32) -> bool {
+        self.streams.contains_key(&stream)
+    }
+
+    pub fn open_streams(&self) -> usize {
+        self.streams.len()
     }
 
     /// Bytes queued for `stream` that flow control has not let out yet.
@@ -282,6 +347,9 @@ impl Connection {
             let payload = self.inbuf[pos + FRAME_HEADER_LEN..end].to_vec();
             pos = end;
             self.frame_in(kind, flags, stream, &payload, events)?;
+            if self.unsent_control > self.limits.max_unsent_control {
+                return Err(calm("control replies are not being read"));
+            }
         }
         self.inbuf.drain(..pos);
         Ok(())
@@ -311,6 +379,9 @@ impl Connection {
                     .continuation
                     .take()
                     .ok_or(protocol("CONTINUATION without HEADERS"))?;
+                if payload.is_empty() && flags & END_HEADERS == 0 {
+                    self.empty_frame()?;
+                }
                 p.block.extend_from_slice(payload);
                 if p.block.len() > self.local.max_header_list_size as usize * 2 {
                     return Err(protocol("header block too large"));
@@ -327,9 +398,9 @@ impl Connection {
                     return Err(protocol("PRIORITY on stream 0"));
                 }
                 if payload.len() != 5 {
-                    self.reset(stream, code::FRAME_SIZE_ERROR);
+                    return self.refuse(stream, code::FRAME_SIZE_ERROR);
                 }
-                Ok(())
+                self.empty_frame()
             }
             RST_STREAM => {
                 if stream == 0 {
@@ -346,7 +417,7 @@ impl Connection {
                     self.unacked.remove(&stream);
                     events.push(Event::Reset { stream, code });
                 }
-                Ok(())
+                self.charge_reset()
             }
             SETTINGS => self.settings_in(flags, stream, payload),
             PUSH_PROMISE => Err(protocol("a client must not push")),
@@ -357,9 +428,10 @@ impl Connection {
                 if payload.len() != 8 {
                     return Err(frame_size("PING length"));
                 }
-                if flags & ACK == 0 {
-                    self.frame(PING, ACK, 0, payload);
+                if flags & ACK != 0 {
+                    return self.empty_frame();
                 }
+                self.frame(PING, ACK, 0, payload);
                 Ok(())
             }
             GOAWAY => {
@@ -377,7 +449,7 @@ impl Connection {
             }
             WINDOW_UPDATE => self.window_update_in(stream, payload),
             // unknown frame types must be ignored
-            _ => Ok(()),
+            _ => self.empty_frame(),
         }
     }
 
@@ -395,15 +467,20 @@ impl Connection {
         let len = payload.len() as i64;
         self.unacked_conn += len;
         let data = unpad(flags, payload)?;
+        let end_stream = flags & END_STREAM != 0;
         let open = matches!(self.streams.get(&stream), Some(s) if !s.remote_closed);
         if !open {
             if self.idle(stream) {
                 return Err(protocol("DATA on an idle stream"));
             }
-            self.reset(stream, code::STREAM_CLOSED);
+            self.refuse(stream, code::STREAM_CLOSED)?;
         } else {
+            if data.is_empty() && !end_stream {
+                self.empty_frame()?;
+            } else {
+                self.empty_frames = 0;
+            }
             *self.unacked.entry(stream).or_default() += len;
-            let end_stream = flags & END_STREAM != 0;
             if end_stream {
                 self.remote_end(stream);
             }
@@ -476,10 +553,7 @@ impl Connection {
                     return Err(protocol("trailers without END_STREAM"));
                 }
             }
-            Some(_) => {
-                self.reset(stream, code::STREAM_CLOSED);
-                return Ok(());
-            }
+            Some(_) => return self.refuse(stream, code::STREAM_CLOSED),
             None if self.client => {
                 return Err(protocol("HEADERS on a stream this client never opened"));
             }
@@ -489,8 +563,7 @@ impl Connection {
                 }
                 self.last_peer_stream = stream;
                 if self.streams.len() >= self.local.max_concurrent_streams as usize {
-                    self.reset(stream, code::REFUSED_STREAM);
-                    return Ok(());
+                    return self.refuse(stream, code::REFUSED_STREAM);
                 }
                 self.streams.insert(
                     stream,
@@ -504,6 +577,7 @@ impl Connection {
                 );
             }
         }
+        self.empty_frames = 0;
         if p.end_stream {
             self.remote_end(stream);
         }
@@ -519,6 +593,8 @@ impl Connection {
         if stream != 0 {
             return Err(protocol("SETTINGS on a stream"));
         }
+        // even a real SETTINGS counts: each one walks every stream
+        self.empty_frame()?;
         if flags & ACK != 0 {
             if !payload.is_empty() {
                 return Err(frame_size("SETTINGS ACK with payload"));
@@ -596,13 +672,11 @@ impl Connection {
             return Ok(());
         };
         if inc == 0 {
-            self.reset(stream, code::PROTOCOL_ERROR);
-            return Ok(());
+            return self.refuse(stream, code::PROTOCOL_ERROR);
         }
         s.send_window += inc;
         if s.send_window > MAX_WINDOW {
-            self.reset(stream, code::FLOW_CONTROL_ERROR);
-            return Ok(());
+            return self.refuse(stream, code::FLOW_CONTROL_ERROR);
         }
         self.flush(stream);
         Ok(())
@@ -690,6 +764,43 @@ impl Connection {
         self.frame(RST_STREAM, 0, stream, &code.to_be_bytes());
     }
 
+    /// Resets a stream because of something the peer did. Such resets
+    /// share the peer's reset budget: a stream this side resets is as
+    /// cheap for the peer to open and abandon as one it resets itself.
+    fn refuse(&mut self, stream: u32, code: u32) -> Result<(), Error> {
+        self.reset(stream, code);
+        self.charge_reset()
+    }
+
+    fn charge_reset(&mut self) -> Result<(), Error> {
+        let burst = self.limits.reset_burst;
+        let step = self.limits.reset_refill.as_nanos().max(1);
+        let now = Instant::now();
+        let earned = now.saturating_duration_since(self.resets_at).as_nanos() / step;
+        if self.resets_left as u128 + earned >= burst as u128 {
+            self.resets_left = burst;
+            self.resets_at = now;
+        } else if earned > 0 {
+            self.resets_left += earned as u32;
+            self.resets_at += self.limits.reset_refill * earned as u32;
+        }
+        match self.resets_left.checked_sub(1) {
+            Some(left) => {
+                self.resets_left = left;
+                Ok(())
+            }
+            None => Err(calm("too many stream resets")),
+        }
+    }
+
+    fn empty_frame(&mut self) -> Result<(), Error> {
+        self.empty_frames += 1;
+        if self.empty_frames > self.limits.max_empty_frames {
+            return Err(calm("too many frames without content"));
+        }
+        Ok(())
+    }
+
     pub fn goaway(&mut self, code: u32) {
         if self.closed {
             return;
@@ -760,6 +871,9 @@ impl Connection {
     }
 
     fn frame(&mut self, kind: u8, flags: u8, stream: u32, payload: &[u8]) {
+        if matches!(kind, PING | SETTINGS | RST_STREAM) {
+            self.unsent_control += 1;
+        }
         let len = payload.len() as u32;
         self.out.extend_from_slice(&len.to_be_bytes()[1..]);
         self.out.push(kind);
@@ -783,6 +897,13 @@ fn unpad(flags: u8, payload: &[u8]) -> Result<&[u8], Error> {
 fn protocol(reason: &'static str) -> Error {
     Error {
         code: code::PROTOCOL_ERROR,
+        reason,
+    }
+}
+
+fn calm(reason: &'static str) -> Error {
+    Error {
+        code: code::ENHANCE_YOUR_CALM,
         reason,
     }
 }
@@ -1043,5 +1164,48 @@ mod tests {
         let rst = frames(&c.take_output()).pop().unwrap();
         assert_eq!((rst.kind, rst.stream), (RST_STREAM, 3));
         assert_eq!(rst.payload, code::REFUSED_STREAM.to_be_bytes());
+    }
+
+    #[test]
+    fn floods_of_unread_replies_or_empty_frames_end_the_connection() {
+        let limits = Limits {
+            max_unsent_control: 3,
+            max_empty_frames: 3,
+            ..Limits::default()
+        };
+        let start = || {
+            let mut c = Connection::server(Settings::default()).with_limits(limits);
+            c.recv(&[PREFACE, &settings(&[])].concat()).unwrap();
+            c.take_output();
+            c
+        };
+        let calm = |c: &mut Connection, input: &[u8]| {
+            assert_eq!(c.recv(input).unwrap_err().code, code::ENHANCE_YOUR_CALM);
+            assert_eq!(frames(&c.take_output()).pop().unwrap().kind, GOAWAY);
+        };
+
+        let mut c = start();
+        let ping = raw(PING, 0, 0, &[0; 8]);
+        c.recv(&ping.repeat(3)).unwrap();
+        c.take_output();
+        c.recv(&ping.repeat(3)).unwrap();
+        calm(&mut c, &ping);
+
+        let mut c = start();
+        c.recv(&request(1, false)).unwrap();
+        let empty = raw(DATA, 0, 1, &[]);
+        let priority = raw(PRIORITY, 0, 1, &[0; 5]);
+        let some = raw(DATA, 0, 1, b"x");
+        let run = [
+            &empty[..],
+            &priority,
+            &empty,
+            &some,
+            &empty,
+            &priority,
+            &empty,
+        ];
+        c.recv(&run.concat()).unwrap();
+        calm(&mut c, &empty);
     }
 }

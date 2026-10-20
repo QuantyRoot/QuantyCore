@@ -216,20 +216,38 @@ flood), windows past 2^31-1, streams beyond the advertised limit, request
 messages above 16 MiB, and streaming responses beyond 4 MiB waiting on
 flow control, after which the sender blocks.
 
-What it does not handle yet, because none of it matters on a local socket
-with one trusted client and all of it matters on a network:
+What a peer on a network could do beyond that, and what now stops it:
 
-- a peer that opens and resets streams as fast as it can (the 2023 rapid
-  reset attack): every unary call it opens still runs to completion;
-- a peer that floods PINGs or SETTINGS and never reads the replies;
-- a peer that opens the maximum number of streaming calls, each of which
-  costs a thread;
-- idle connections, which nothing times out.
+- Opening and resetting streams as fast as it can (the 2023 rapid reset
+  attack, CVE-2023-44487), or making this side reset them with stream
+  errors (CVE-2025-8671). A unary call reset before a pool thread picks it
+  up is dropped without running. Every reset, sent or provoked, spends
+  from a budget of 1000 that refills at 33 a second, nghttp2's numbers;
+  an empty budget ends the connection with GOAWAY ENHANCE_YOUR_CALM.
+- Flooding PINGs or SETTINGS and never reading the replies. More than
+  1000 replies from one read of the socket end the connection the same
+  way, and so do 1000 frames in a row that give nothing to act on:
+  PRIORITY, empty DATA or CONTINUATION, stray acks, SETTINGS, unknown
+  types. A write the peer does not take within 30 seconds drops the
+  connection, since the thread that reads a connection also writes its
+  replies.
+- Opening the maximum number of streaming calls, each a thread. They are
+  capped at 256 per connection and 1024 per server, and a call beyond
+  either cap ends at once with RESOURCE_EXHAUSTED. The advertised
+  MAX_CONCURRENT_STREAMS stays at 1000.
+- Idle connections. A connection has 10 seconds to send its preface and
+  SETTINGS, and one with no open stream that sends nothing for 5 minutes
+  gets GOAWAY NO_ERROR.
 
-**The cost:** none today, a hole the day this listens on a network. TLS is
-the point where that happens (ADR-003), so these four come before any
-listener that accepts a connection from another machine, and that rule is
-the reason this record exists.
+Every number is a field of `grpc::Options` or `h2::Limits`, and
+`serve_unix` takes the defaults. Not bounded here: the number of
+connections, each a reading thread. A listener that accepts connections
+from another machine (ADR-003) caps those itself.
+
+**The cost:** a client that cancels more than 33 calls a second for long,
+holds more than 256 streaming calls on one connection, or stops reading
+for 30 seconds now loses its call or its connection, where before it was
+served.
 
 ## ADR-007: gzip and tar stream with fixed memory, and accept what zlib accepts
 
