@@ -83,6 +83,7 @@ impl Pki {
 }
 
 #[test]
+#[cfg_attr(not(unix), ignore = "needs operating system randomness (ADR-040)")]
 fn a_good_chain_and_its_names() {
     let p = pki_with(|_| {});
     assert_eq!(p.check(p.leaf(|_| {}), "www.example.com"), Ok(()));
@@ -105,6 +106,7 @@ fn a_good_chain_and_its_names() {
 }
 
 #[test]
+#[cfg_attr(not(unix), ignore = "needs operating system randomness (ADR-040)")]
 fn time_bounds() {
     let p = pki_with(|_| {});
     assert_eq!(
@@ -123,6 +125,7 @@ fn time_bounds() {
 }
 
 #[test]
+#[cfg_attr(not(unix), ignore = "needs operating system randomness (ADR-040)")]
 fn issuers_must_be_trusted_cas() {
     let p = pki_with(|_| {});
     // No path to a root.
@@ -152,6 +155,7 @@ fn issuers_must_be_trusted_cas() {
 }
 
 #[test]
+#[cfg_attr(not(unix), ignore = "needs operating system randomness (ADR-040)")]
 fn signatures_are_checked() {
     let p = pki_with(|_| {});
     let mut leaf = p.leaf(|_| {});
@@ -186,6 +190,7 @@ fn signatures_are_checked() {
 }
 
 #[test]
+#[cfg_attr(not(unix), ignore = "needs operating system randomness (ADR-040)")]
 fn purpose_and_path_length() {
     let p = pki_with(|_| {});
     let client_only = p.leaf(|l| l.server_auth = false);
@@ -238,6 +243,7 @@ fn purpose_and_path_length() {
 }
 
 #[test]
+#[cfg_attr(not(unix), ignore = "needs operating system randomness (ADR-040)")]
 fn name_constraints() {
     let p = pki_with(|i| {
         i.name_constraints = Some((
@@ -287,6 +293,7 @@ fn name_constraints() {
 }
 
 #[test]
+#[cfg_attr(not(unix), ignore = "needs operating system randomness (ADR-040)")]
 fn a_path_longer_than_six_is_refused() {
     // A valid chain with eight intermediates: every signature is right,
     // only the length is not.
@@ -324,6 +331,7 @@ fn a_path_longer_than_six_is_refused() {
 }
 
 #[test]
+#[cfg_attr(not(unix), ignore = "needs operating system randomness (ADR-040)")]
 fn an_issuer_without_key_cert_sign() {
     let p = pki_with(|i| i.ca_key_usage = Some(super::cert::key_usage::DIGITAL_SIGNATURE));
     assert_eq!(
@@ -476,6 +484,7 @@ fn parser_refuses_what_rfc_5280_forbids() {
 }
 
 #[test]
+#[cfg_attr(not(unix), ignore = "needs operating system randomness (ADR-040)")]
 fn wide_search_hits_the_signature_budget() {
     // Two levels of sixteen candidates each, all really signing the level
     // below and none leading anywhere: 16 times 16 signature checks, at

@@ -718,6 +718,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(unix), ignore = "needs operating system randomness (ADR-040)")]
     fn ecdh_agrees_and_refuses_points_off_the_curve() {
         for curve in [Curve::P256, Curve::P384] {
             let a = SecretKey::generate(curve).unwrap();

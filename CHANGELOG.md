@@ -24,6 +24,13 @@ the pre-1.0 rule that a minor version may break anything.
   nowhere else. Paths are now converted portably; the gRPC server's Unix
   socket listener exists only on Unix, where Unix sockets do (ADR-041).
 
+### Known limits
+
+- On Windows, TLS cannot generate keys or complete a handshake: there is
+  no operating system randomness without `unsafe`, so it returns
+  `Unsupported` instead of using a weaker source (ADR-040). Everything
+  else works there.
+
 ### Added
 
 - CI builds and tests on macOS and Windows as well, with clippy.

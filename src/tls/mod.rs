@@ -13,7 +13,9 @@ pub mod crypto;
 pub mod error;
 pub mod key_schedule;
 pub mod kx;
+#[cfg(unix)]
 mod loopback;
+#[cfg(unix)]
 mod loopback12;
 pub mod msgs;
 pub mod record;

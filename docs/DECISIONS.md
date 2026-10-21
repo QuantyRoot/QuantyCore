@@ -1343,10 +1343,24 @@ Unix sockets. Code for AppArmor stays on every platform: compiling a
 profile is useful anywhere, and loading one fails at the file system
 like any other missing file.
 
+**TLS has no randomness on Windows.** It reads the kernel's CSPRNG from
+`/dev/urandom` (rand.rs); Windows has no such file, and asking it for
+random bytes means calling ProcessPrng or BCryptGenRandom, which needs
+`unsafe`. On Windows `rand::fill` therefore returns `Unsupported`, so
+generating a key and every handshake fail with that error. It never falls
+back to something weaker; `RandomState`'s keys, the one source std
+offers, are per thread and counted up, not a CSPRNG. The way out is the
+boundary crate ADR-001 already describes, the way `quantydb-sys` does it;
+that is a new crate and its own decision. Everything that does not need
+randomness works on Windows: the protocols, verifying signatures and
+chains, parsing, AppArmor.
+
 **Tests that run on Unix only, and why:** the gRPC tests talk to the
-server over socket pairs; the tar tests compare with the system's `tar`
-and make symlinks; the AppArmor kernel test needs Linux. Every other test
-runs on all three.
+server over socket pairs; the tar tests compare with GNU tar, so they run
+on Linux, where it is the system's tar; the AppArmor kernel test needs
+Linux; on Windows, the TLS tests that generate keys or run handshakes,
+the loopback suites and the TLS fuzzer, since there is no randomness
+there. Every other test runs on all three.
 
 **Checked by:** a CI job on macOS and Windows running clippy with
 `-D warnings` and the whole test suite, as QuantyDB's `portable` job does.

@@ -261,13 +261,13 @@ impl ServerConfig {
         Ok(())
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn only_tls12(&mut self) {
         self.tls12 = true;
         self.max_tls12 = true;
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn require_client_verifier(&mut self, verifier: Arc<dyn PeerVerifier>) {
         self.client_auth = ClientAuth::Required(verifier);
     }

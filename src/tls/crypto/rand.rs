@@ -6,12 +6,28 @@
 //! pool is initialized. The file is opened once and kept, so a process
 //! that later runs out of descriptors or enters a chroot still has it.
 
+#[cfg(unix)]
 use std::fs::File;
-use std::io::{self, Read};
+use std::io;
+#[cfg(unix)]
+use std::io::Read;
+#[cfg(unix)]
 use std::sync::OnceLock;
 
+#[cfg(unix)]
 static URANDOM: OnceLock<File> = OnceLock::new();
 
+/// Fills `buf` from the operating system. Only Unix has a file to read
+/// it from; elsewhere this is an error, never a weaker source (ADR-040).
+#[cfg(not(unix))]
+pub fn fill(_buf: &mut [u8]) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "no operating system randomness on this platform without unsafe (ADR-040)",
+    ))
+}
+
+#[cfg(unix)]
 pub fn fill(buf: &mut [u8]) -> io::Result<()> {
     let f = match URANDOM.get() {
         Some(f) => f,
@@ -28,6 +44,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg_attr(not(unix), ignore = "needs operating system randomness (ADR-040)")]
     fn two_draws_differ() {
         let (mut a, mut b) = ([0u8; 32], [0u8; 32]);
         fill(&mut a).unwrap();

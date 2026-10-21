@@ -13,6 +13,10 @@
 //! `QUANTY_FUZZ_SEED=s QUANTY_FUZZ_FROM=i QUANTY_FUZZ_ITERS=1` replays it.
 //! The default run is short; CI runs a long one.
 
+// The corpus is built from fresh keys and handshakes, which need the
+// operating system's randomness (ADR-040).
+#![cfg(unix)]
+
 use quantycore::tls::msgs;
 use quantycore::tls::x509::build::{issue, Issuer, Params, SanEntry};
 use quantycore::tls::x509::csr::{request, CertificateRequest};

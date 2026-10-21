@@ -359,7 +359,7 @@ impl Core {
         Ok(())
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn write_secret_for_test(&self) -> Vec<u8> {
         self.write_secret
             .as_ref()
