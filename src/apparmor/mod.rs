@@ -96,7 +96,7 @@ mod tests {
     /// allows compile in a thread with a 2 MiB stack, the default for
     /// threads a caller spawns.
     #[test]
-    fn deepest_nesting_fits_a_small_stack() {
+    fn deepest_nesting_and_long_chains_fit_a_small_stack() {
         let n = 1020;
         let mut texts = Vec::new();
         let mut s = String::from("$a = true\n/p {\n");
@@ -114,6 +114,23 @@ mod tests {
             s.push_str(&"}\n".repeat(n + 1));
             texts.push(s);
         }
+        // Long chains are not nesting and are not bounded by it.
+        let chain = |op: &str| {
+            let mut s = String::from("$a = true\n/p {\nif ");
+            s.push_str(&format!("$a {op} ").repeat(20_000));
+            s.push_str("$a { /x r, }\n}\n");
+            s
+        };
+        texts.push(chain("and"));
+        texts.push(chain("or"));
+        let mut s = String::from("$a = true\n/p {\nif ");
+        s.push_str(&"not ".repeat(100_001));
+        s.push_str("$a { /x r, }\n}\n");
+        texts.push(s);
+        let mut s = String::from("$a = true\n/p {\nif $a { /x r, }\n");
+        s.push_str(&"else if $a { /y r, }\n".repeat(50_000));
+        s.push_str("}\n");
+        texts.push(s);
         for t in texts {
             std::thread::Builder::new()
                 .stack_size(2 << 20)

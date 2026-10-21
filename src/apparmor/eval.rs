@@ -553,15 +553,19 @@ impl Symtab {
     /// either side is an error.
     pub(crate) fn eval(&mut self, e: &Expr) -> Result<bool, String> {
         match e {
-            Expr::Or(a, b) => {
-                let x = self.eval(a)?;
-                let y = self.eval(b)?;
-                Ok(x || y)
+            Expr::Or(list) => {
+                let mut any = false;
+                for e in list {
+                    any |= self.eval(e)?;
+                }
+                Ok(any)
             }
-            Expr::And(a, b) => {
-                let x = self.eval(a)?;
-                let y = self.eval(b)?;
-                Ok(x && y)
+            Expr::And(list) => {
+                let mut all = true;
+                for e in list {
+                    all &= self.eval(e)?;
+                }
+                Ok(all)
             }
             Expr::Not(a) => Ok(!self.eval(a)?),
             Expr::BoolVar(v, _) => {

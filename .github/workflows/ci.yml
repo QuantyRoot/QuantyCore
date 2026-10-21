@@ -181,9 +181,8 @@ jobs:
           QUANTY_FUZZ_ITERS: 200000
 
   # Upstream's own parser tests, at the commit ADR-032 names: every case
-  # marked to pass must pass, and refusals still owed by stages not yet
-  # built are counted against a ceiling that only goes down. Then the
-  # real profiles of two distributions, upstream and three container
+  # marked to pass must pass and every case marked to fail must fail.
+  # Then the real profiles of two distributions, upstream and three container
   # runtimes (ADR-034).
   apparmor-suites:
     name: AppArmor against upstream's tests and real profiles
@@ -260,6 +259,14 @@ jobs:
           QUANTY_APPARMOR_TST: ${{ runner.temp }}/apparmor/parser/tst
           QUANTY_FUZZ_SEED: ${{ github.run_id }}
           QUANTY_FUZZ_ITERS: 60000
+      # Release builds wrap on overflow; a debug build panics, so a
+      # shorter run there finds arithmetic the long run cannot see.
+      - name: 8,000 cases per target with overflow checks
+        run: cargo test --test apparmor_fuzz -- --nocapture
+        env:
+          QUANTY_APPARMOR_TST: ${{ runner.temp }}/apparmor/parser/tst
+          QUANTY_FUZZ_SEED: ${{ github.run_id }}
+          QUANTY_FUZZ_ITERS: 8000
 
   apparmor-mutants:
     name: AppArmor tests fail on deliberately broken code

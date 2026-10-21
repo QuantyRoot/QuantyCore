@@ -65,7 +65,7 @@ const NAMES: &[(&str, u32)] = &[
 fn mapping(sig: &[u8]) -> Option<u32> {
     if let Some(rest) = sig.strip_prefix(b"rtmin+") {
         let n = strtoul_prefix(rest).unwrap_or(0);
-        return (n <= MAXRT).then_some(MINRT + n as u32);
+        return (n <= MAXRT).then(|| MINRT + n as u32);
     }
     NAMES
         .iter()
@@ -191,6 +191,8 @@ mod tests {
         assert_eq!(mapping(b"rtmin+0"), Some(MINRT));
         assert_eq!(mapping(b"rtmin+32"), Some(MINRT + 32));
         assert_eq!(mapping(b"rtmin+33"), None);
+        assert_eq!(mapping(b"rtmin+4294967295"), None);
+        assert_eq!(mapping(b"rtmin+99999999999999999999"), None);
         assert_eq!(mapping(b"rtmin+"), Some(MINRT));
         assert_eq!(mapping(b"rtmin+5x"), Some(MINRT + 5));
         assert_eq!(mapping(b"hup"), Some(1));

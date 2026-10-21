@@ -585,47 +585,133 @@ pub fn build(
     Ok(minimize(dfa))
 }
 
-/// Merges states that no input tells apart, by refining partitions that
-/// start from equal permissions. The start state is kept apart, as
-/// upstream keeps it, so it is never merged with another state.
+/// Merges states that no input tells apart: Hopcroft's partition
+/// refinement, starting from equal permissions, in O(columns n log n).
+/// Refining round by round instead is quadratic in the length of a
+/// literal path. The start state is kept apart, as upstream keeps it, so
+/// it is never merged with another state.
 pub fn minimize(dfa: Dfa) -> Dfa {
     let n = dfa.states();
     let cols = dfa.columns();
-    let mut part: Vec<u32> = vec![0; n];
+    let mut blk: Vec<u32> = vec![0; n];
+    let mut nblocks = 1usize;
     {
         let mut ids: HashMap<Perms, u32> = HashMap::new();
-        let mut next = 1u32;
-        for (s, slot) in part.iter_mut().enumerate() {
+        for (s, slot) in blk.iter_mut().enumerate() {
             if s == START as usize {
                 *slot = 0;
                 continue;
             }
             *slot = *ids.entry(dfa.perms[s]).or_insert_with(|| {
-                next += 1;
-                next - 1
+                nblocks += 1;
+                nblocks as u32 - 1
             });
         }
     }
-    let mut count = part.iter().copied().max().unwrap_or(0) as usize + 1;
-    loop {
-        let mut sig: HashMap<Vec<u32>, u32> = HashMap::new();
-        let mut next_part = vec![0u32; n];
-        for s in 0..n {
-            let mut key = Vec::with_capacity(cols + 1);
-            key.push(part[s]);
-            for c in 0..cols {
-                key.push(part[dfa.trans[s * cols + c] as usize]);
-            }
-            let len = sig.len() as u32;
-            next_part[s] = *sig.entry(key).or_insert(len);
+    // States grouped by block, each block a range of `elems`.
+    let mut elems: Vec<u32> = (0..n as u32).collect();
+    elems.sort_by_key(|&s| blk[s as usize]);
+    let mut loc: Vec<usize> = vec![0; n];
+    let mut first: Vec<usize> = vec![0; nblocks];
+    let mut end: Vec<usize> = vec![0; nblocks];
+    for (i, &s) in elems.iter().enumerate() {
+        loc[s as usize] = i;
+        let b = blk[s as usize] as usize;
+        if i == 0 || blk[elems[i - 1] as usize] as usize != b {
+            first[b] = i;
         }
-        let new_count = sig.len();
-        part = next_part;
-        if new_count == count {
-            break;
-        }
-        count = new_count;
+        end[b] = i + 1;
     }
+    // Predecessors by symbol: pred_at[c * n + t] .. pred_at[c * n + t + 1]
+    // index the states that go to t on c.
+    let mut pred_at: Vec<usize> = vec![0; cols * n + 1];
+    for s in 0..n {
+        for c in 0..cols {
+            pred_at[c * n + dfa.trans[s * cols + c] as usize + 1] += 1;
+        }
+    }
+    for i in 1..pred_at.len() {
+        pred_at[i] += pred_at[i - 1];
+    }
+    let mut preds: Vec<u32> = vec![0; cols * n];
+    {
+        let mut fill = pred_at.clone();
+        for s in 0..n {
+            for c in 0..cols {
+                let k = c * n + dfa.trans[s * cols + c] as usize;
+                preds[fill[k]] = s as u32;
+                fill[k] += 1;
+            }
+        }
+    }
+    let mut waiting: Vec<(u32, u32)> = Vec::new();
+    let mut queued: Vec<bool> = Vec::new();
+    for b in 0..nblocks {
+        for c in 0..cols {
+            waiting.push((b as u32, c as u32));
+            queued.push(true);
+        }
+    }
+    let mut marked: Vec<usize> = vec![0; nblocks];
+    let mut touched: Vec<u32> = Vec::new();
+    let mut splitter: Vec<u32> = Vec::new();
+    while let Some((b, c)) = waiting.pop() {
+        let (b, c) = (b as usize, c as usize);
+        queued[b * cols + c] = false;
+        splitter.clear();
+        for &t in &elems[first[b]..end[b]] {
+            let k = c * n + t as usize;
+            splitter.extend_from_slice(&preds[pred_at[k]..pred_at[k + 1]]);
+        }
+        for &s in &splitter {
+            let s = s as usize;
+            let y = blk[s] as usize;
+            let at = first[y] + marked[y];
+            if loc[s] < at {
+                continue;
+            }
+            if marked[y] == 0 {
+                touched.push(y as u32);
+            }
+            // Move s to the front of its block, among the marked ones.
+            let other = elems[at] as usize;
+            elems.swap(loc[s], at);
+            loc[other] = loc[s];
+            loc[s] = at;
+            marked[y] += 1;
+        }
+        for &y in &touched {
+            let y = y as usize;
+            let m = std::mem::take(&mut marked[y]);
+            if m == end[y] - first[y] {
+                continue;
+            }
+            let z = first.len();
+            first.push(first[y]);
+            end.push(first[y] + m);
+            first[y] += m;
+            marked.push(0);
+            for &s in &elems[first[z]..end[z]] {
+                blk[s as usize] = z as u32;
+            }
+            let (ys, zs) = (end[y] - first[y], end[z] - first[z]);
+            queued.resize(first.len() * cols, false);
+            for d in 0..cols {
+                let pick = if queued[y * cols + d] || zs <= ys {
+                    z
+                } else {
+                    y
+                };
+                if !queued[pick * cols + d] {
+                    queued[pick * cols + d] = true;
+                    waiting.push((pick as u32, d as u32));
+                }
+            }
+        }
+        touched.clear();
+    }
+    let part = blk;
+    let count = first.len();
     // Renumber so that the dead state is 0 and the start 1.
     let mut order: Vec<u32> = vec![u32::MAX; count];
     let mut reps: Vec<usize> = Vec::with_capacity(count);
@@ -788,6 +874,19 @@ mod tests {
             build(&root, &p, true, false, states(50)).unwrap_err(),
             DfaError::TooLarge
         );
+    }
+
+    /// A literal path is a chain of states that refinement round by round
+    /// splits one state per round; this one would take minutes that way.
+    #[test]
+    fn a_long_literal_path_minimizes_quickly() {
+        let path = format!("/{}", "a".repeat(20_000));
+        let root = Node::Alt(vec![rule(&path, 0), rule("/b", 0)]);
+        let start = std::time::Instant::now();
+        let dfa = build(&root, &[allow(MAY_READ)], true, false, Limits::default()).unwrap();
+        assert_eq!(dfa.perms[dfa.run(path.as_bytes()) as usize].allow, MAY_READ);
+        assert_eq!(dfa.states(), 20_003);
+        assert!(start.elapsed().as_secs() < 60);
     }
 
     #[test]

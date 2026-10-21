@@ -29,6 +29,7 @@ through and add a new entry, never silently edit history.
 - [ADR-036](#adr-036-the-policy-rule-kinds-follow-upstreams-classes-quirks-included) The policy rule kinds follow upstream's classes, quirks included
 - [ADR-037](#adr-037-the-binary-policy-is-upstreams-values-with-tables-of-our-own) The binary policy is upstream's values with tables of our own
 - [ADR-038](#adr-038-runtimedefault-is-containerds-profile-rendered-the-same-way) RuntimeDefault is containerd's profile, rendered the same way
+- [ADR-039](#adr-039-what-the-first-outside-review-found-and-what-changed) What the first outside review found, and what changed
 
 ## ADR-001: Nothing outside the standard library, and QuantyRoot is not outside
 
@@ -973,7 +974,8 @@ Every case upstream accepts parses here. Cases upstream refuses for
 reasons beyond the grammar are counted as pending until the stage that
 refuses them exists, against a ceiling in the test that only goes down
 and ends at zero. Cases upstream marks as known wrong (TODO) are expected
-to behave as upstream behaves, not as it would like to.
+to behave as upstream behaves, not as it would like to. (It reached zero
+with ADR-036; since then the test requires zero and has no ceiling.)
 
 **The cost:** a lexer that reproduces upstream's quirks instead of a
 cleaner grammar, and one that has to follow every change upstream makes
@@ -1059,7 +1061,8 @@ bytes that no expression tells apart, computed once per automaton,
 instead of upstream's per state transition maps; positions are numbered
 leaves of an arena tree, and every walk over the tree uses an explicit
 stack, because factoring a list of long paths builds a trie whose depth
-is a path's length. Minimization is Moore's refinement.
+is a path's length. ~~Minimization is Moore's refinement.~~ Minimization
+is Hopcroft's refinement since ADR-039.
 
 **Why the factoring is upstream's own.** Without it, upstream's suite
 contains a profile (`profile/exploding_profile.sd`) whose subset
@@ -1252,3 +1255,42 @@ files and compares the automata with upstream's.
 
 **Cost:** containerd changes its template now and then; the corpus pin
 has to move with it, and the comparison shows where.
+
+## ADR-039: What the first outside review found, and what changed
+
+A reviewer who had not written the code read the AppArmor stack against
+upstream and fed it hostile profiles. Found and changed:
+
+- **Long chains overflowed the stack.** `and`, `or` and `not` chains
+  were parsed into trees as deep as the chain, and an `else if` chain
+  into boxes nested as deep; evaluating or dropping 20,000 of them
+  aborted the process, which no caller can catch. Chains are now lists,
+  repeated `not` is folded to its parity (the operand is evaluated
+  either way, so errors stay the same), and the `else if` chain is
+  dropped in a loop. A test runs all four on a 2 MiB stack.
+- **An overflow in debug builds.** `rtmin+` with a number past 32 bits
+  added before it checked the range. Release builds wrapped and threw
+  the value away, which is why the release fuzzer never saw it; the fuzz
+  job now also runs a shorter debug build.
+- **Minimization was quadratic in a path's length.** Moore's refinement
+  splits a chain of states one per round; a single 16 KiB path took 34
+  seconds, and nothing bounded it but the file size. It is Hopcroft's
+  refinement now, which gives the same coarsest partition: 16 KiB takes
+  0.08 seconds and the corpus automata still equal upstream's.
+- **The writer truncated silently.** Lengths and counts beyond 16 bits,
+  a NUL inside a name, and a transition base beyond 24 bits are refused
+  when writing instead of producing a policy that names something else.
+  Upstream truncates; a policy it would write that way is not one anyone
+  meant.
+- **Documentation.** `ExecTransition::apply` says the caller vouches
+  that its root is procfs (runc checks with fstatfs, which the standard
+  library cannot); `RuntimeDefault::render` says its fields go in
+  unescaped. ADR-033's ceiling for pending refusals ended at zero.
+
+**Not changed:** a profile name written as `\000` in quotes stays those
+four characters, as the reviewer's suspicion of an embedded NUL did not
+hold.
+
+**Checked by:** the new unit tests and mutants, the corpus and
+simple_tests differentials against upstream after the minimizer change,
+and a debug build fuzz run of four seeds.

@@ -112,6 +112,17 @@ pub enum Else {
     If(Box<If>),
 }
 
+// An `else if` chain is a list of any length held as nested boxes; the
+// default drop would recurse once per branch.
+impl Drop for If {
+    fn drop(&mut self) {
+        let mut next = self.otherwise.take();
+        while let Some(Else::If(mut inner)) = next {
+            next = inner.otherwise.take();
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RuleMode {
     #[default]
@@ -288,9 +299,11 @@ pub struct Operand {
 }
 
 #[derive(Debug, Clone)]
+/// A condition. Chains of `or` and `and` are kept flat and repeated
+/// `not` is folded, so only parentheses nest, and those are bounded.
 pub enum Expr {
-    Or(Box<Expr>, Box<Expr>),
-    And(Box<Expr>, Box<Expr>),
+    Or(Vec<Expr>),
+    And(Vec<Expr>),
     Not(Box<Expr>),
     BoolVar(Vec<u8>, Span),
     Defined(Vec<u8>, Span),

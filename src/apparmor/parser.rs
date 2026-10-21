@@ -848,22 +848,28 @@ impl Parser<'_> {
 
     fn expr(&mut self) -> Result<Expr, Error> {
         self.enter_expr()?;
-        let mut lhs = self.term()?;
+        let mut terms = vec![self.term()?];
         while self.eat(T::Or)?.is_some() {
-            let rhs = self.term()?;
-            lhs = Expr::Or(Box::new(lhs), Box::new(rhs));
+            terms.push(self.term()?);
         }
         self.leave_expr();
-        Ok(lhs)
+        Ok(if terms.len() == 1 {
+            terms.pop().unwrap_or(Expr::Or(Vec::new()))
+        } else {
+            Expr::Or(terms)
+        })
     }
 
     fn term(&mut self) -> Result<Expr, Error> {
-        let mut lhs = self.not_factor()?;
+        let mut factors = vec![self.not_factor()?];
         while self.eat(T::And)?.is_some() {
-            let rhs = self.not_factor()?;
-            lhs = Expr::And(Box::new(lhs), Box::new(rhs));
+            factors.push(self.not_factor()?);
         }
-        Ok(lhs)
+        Ok(if factors.len() == 1 {
+            factors.pop().unwrap_or(Expr::And(Vec::new()))
+        } else {
+            Expr::And(factors)
+        })
     }
 
     fn not_factor(&mut self) -> Result<Expr, Error> {
@@ -871,11 +877,14 @@ impl Parser<'_> {
         while self.eat(T::Not)?.is_some() {
             nots += 1;
         }
-        let mut e = self.factor()?;
-        for _ in 0..nots {
-            e = Expr::Not(Box::new(e));
-        }
-        Ok(e)
+        // An even number of nots evaluates the operand all the same, so
+        // only the parity is kept.
+        let e = self.factor()?;
+        Ok(if nots % 2 == 1 {
+            Expr::Not(Box::new(e))
+        } else {
+            e
+        })
     }
 
     fn factor(&mut self) -> Result<Expr, Error> {
@@ -1044,6 +1053,17 @@ mod tests {
         let f =
             p("$a = true\n/a { if $a { /x r, } else if defined @{b} { /y r, } else { } }").unwrap();
         assert!(matches!(f.profiles[0].body[0], Item::If(_)));
+        let cond = |src: &str| {
+            let f = p(&format!("/a {{ if {src} {{ }} }}")).unwrap();
+            match &f.profiles[0].body[0] {
+                Item::If(i) => i.cond.clone(),
+                _ => unreachable!("an if"),
+            }
+        };
+        assert!(matches!(cond("not not $a"), Expr::BoolVar(..)));
+        assert!(matches!(cond("not not not $a"), Expr::Not(_)));
+        assert!(matches!(cond("$a and $b and $c"), Expr::And(v) if v.len() == 3));
+        assert!(matches!(cond("$a or $b and $c or $d"), Expr::Or(v) if v.len() == 3));
     }
 
     #[test]

@@ -78,6 +78,8 @@ impl RuntimeDefault {
     }
 
     /// The profile text, byte for byte what containerd's template gives.
+    /// The fields go in unescaped, as containerd puts them in; a name from
+    /// an untrusted source can add rules of its own.
     pub fn render(&self) -> String {
         let mut s = String::from("\n");
         if let Some(abi) = &self.abi {

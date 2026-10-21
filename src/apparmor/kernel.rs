@@ -277,7 +277,9 @@ impl ExecTransition {
     }
 
     /// Writes the command for the calling thread, for callers that may
-    /// allocate. `proc` is the host's procfs root, normally `/proc`.
+    /// allocate. `proc` is the host's procfs root, normally `/proc`. The
+    /// caller vouches that it is procfs: runc checks the opened file with
+    /// fstatfs, which the standard library cannot do.
     pub fn apply(&self, proc: &Path) -> io::Result<()> {
         let open = |f: AttrFile| OpenOptions::new().write(true).open(proc.join(f.path()));
         // libapparmor falls back only when opening fails; a write the

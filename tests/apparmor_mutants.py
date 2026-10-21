@@ -112,6 +112,20 @@ MUTANTS = [
         UNIT, "explosion_is_an_error_not_an_abort", [],
     ),
     (
+        "dfa: minimization refines only from the first block",
+        "src/apparmor/compile/dfa.rs",
+        "    for b in 0..nblocks {",
+        "    for b in 0..1 {",
+        DIFF, "corpus_automata_match_upstream", REF,
+    ),
+    (
+        "parser: not chains keep the wrong parity",
+        "src/apparmor/parser.rs",
+        "Ok(if nots % 2 == 1 {",
+        "Ok(if nots % 2 == 0 {",
+        UNIT, "conditionals_nest_and_chain", [],
+    ),
+    (
         "network: allowed families written as audited",
         "src/apparmor/class/network.rs",
         "                    e[0] |= bits;\n                    if audit {",

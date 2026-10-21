@@ -47,6 +47,10 @@ const PARSER_ABI_VERSION: u32 = 2;
 #[derive(Default)]
 struct W {
     b: Vec<u8>,
+    /// The first value the format cannot hold. Upstream truncates
+    /// lengths to 16 bits and cuts strings at a NUL; a policy written that
+    /// way names something other than the profile meant, so it is refused.
+    err: Option<String>,
 }
 
 impl W {
@@ -83,11 +87,29 @@ impl W {
     /// A string of `s` and a NUL, as upstream's sd_write_strn writes it.
     fn strn(&mut self, s: &[u8], n: Option<&str>) {
         self.name(n);
+        if s.len() >= u16::MAX as usize {
+            self.fail(format!("a string of {} bytes is too long to load", s.len()));
+        }
         self.b.push(SD_STRING);
         self.b
             .extend_from_slice(&((s.len() + 1) as u16).to_le_bytes());
         self.b.extend_from_slice(s);
         self.b.push(0);
+    }
+
+    /// A name from the profile, which the kernel reads up to its NUL.
+    fn text(&mut self, s: &[u8], n: Option<&str>) {
+        self.no_nul(s);
+        self.strn(s, n);
+    }
+
+    fn no_nul(&mut self, s: &[u8]) {
+        if s.contains(&0) {
+            self.fail(format!(
+                "{} contains a NUL byte",
+                String::from_utf8_lossy(s).replace('\0', "\\000")
+            ));
+        }
     }
 
     fn structure(&mut self, n: &str) {
@@ -99,10 +121,17 @@ impl W {
         self.b.push(SD_STRUCTEND);
     }
 
-    fn array(&mut self, n: Option<&str>, size: u16) {
+    fn array(&mut self, n: Option<&str>, size: usize) {
         self.name(n);
+        if size > u16::MAX as usize {
+            self.fail(format!("{size} entries are too many for one array"));
+        }
         self.b.push(SD_ARRAY);
-        self.b.extend_from_slice(&size.to_le_bytes());
+        self.b.extend_from_slice(&(size as u16).to_le_bytes());
+    }
+
+    fn fail(&mut self, m: String) {
+        self.err.get_or_insert(m);
     }
 
     fn arrayend(&mut self) {
@@ -132,7 +161,7 @@ struct Packed {
     oob: bool,
 }
 
-fn pack(d: &Dfa) -> Packed {
+fn pack(d: &Dfa) -> Result<Packed, String> {
     let n = d.states();
     let cols = d.nclasses;
     let mut base = vec![0u32; n];
@@ -207,6 +236,10 @@ fn pack(d: &Dfa) -> Packed {
         while first_free < used.len() && used[first_free] {
             first_free += 1;
         }
+        // The base shares its word with the flags in the top byte.
+        if b >= 1 << 24 {
+            return Err("transition table too large for the kernel".into());
+        }
         base[s] |= b as u32;
     }
     // The kernel reads up to 255 entries past every base, byte classes
@@ -219,13 +252,13 @@ fn pack(d: &Dfa) -> Packed {
     let len = (max_base + 256).max(next.len());
     next.resize(len, 0);
     check.resize(len, 0);
-    Packed {
+    Ok(Packed {
         base,
         def,
         next,
         check,
         oob: oob_any,
-    }
+    })
 }
 
 fn table(out: &mut Vec<u8>, id: u16, width: usize, vals: impl Iterator<Item = u32>) {
@@ -264,7 +297,7 @@ fn dfa_blob(d: &Dfa, accept: Accept) -> Result<(Vec<u8>, Vec<AaPerms>), String> 
     if d.states() >= MAX_STATES {
         return Err(format!("Too many states ({}) for type state_t", d.states()));
     }
-    let p = pack(d);
+    let p = pack(d)?;
     let n = d.states();
     let mut accept1 = vec![0u32; n];
     let mut accept2: Vec<u32> = Vec::new();
@@ -342,7 +375,7 @@ fn dfa_blob(d: &Dfa, accept: Accept) -> Result<(Vec<u8>, Vec<AaPerms>), String> 
 fn write_perms(w: &mut W, table: &[AaPerms], file: bool, s: &Support) {
     w.structure("perms");
     w.named_u32("version", 1);
-    w.array(None, table.len() as u16);
+    w.array(None, table.len());
     for p in table {
         for v in [
             0, p.allow, p.deny, p.subtree, p.cond, p.kill, p.complain, p.prompt, p.audit, p.quiet,
@@ -386,14 +419,16 @@ fn write_xtable(w: &mut W, p: &Profile) {
     }
     w.structure("xtable");
     let names: Vec<&Vec<u8>> = p.exec_table[4..].iter().flatten().collect();
-    w.array(None, names.len() as u16);
+    w.array(None, names.len());
     for n in names {
+        w.no_nul(n);
         let mut v = n.clone();
         if v.first() == Some(&b':') {
             if let Some(i) = v[1..].iter().position(|&c| c == b':') {
                 v[i + 1] = 0;
             }
         }
+        // The NUL between namespace and name is the kernel's separator.
         w.strn(&v, None);
     }
     w.arrayend();
@@ -421,16 +456,16 @@ fn write_profile(
     net: Option<&NetTable>,
 ) -> Result<(), String> {
     w.structure("profile");
-    w.strn(name, None);
+    w.text(name, None);
     if let Some((x, len)) = &p.xmatch {
         write_dfa(w, x, false, true, s)?;
         w.u32(*len as u32);
     }
     if let Some(d) = &p.flags.disconnected_path {
-        w.strn(d, Some("disconnected"));
+        w.text(d, Some("disconnected"));
     }
     if let (Some(d), true) = (&p.flags.disconnected_ipc, s.flag_disconnected_ipc) {
-        w.strn(d, Some("disconnected_ipc"));
+        w.text(d, Some("disconnected_ipc"));
     }
     if p.flags.signal != 0 && s.flag_signal {
         w.named_u32("kill", p.flags.signal);
@@ -480,19 +515,19 @@ fn write_profile(
     w.u32(0);
     w.structend();
     if s.identity_names {
-        w.array(Some("identity"), p.identities.len() as u16);
+        w.array(Some("identity"), p.identities.len());
         for id in &p.identities {
-            w.strn(id, None);
+            w.text(id, None);
         }
         w.arrayend();
     }
     if let Some(x) = &p.xattrs {
         if !x.conds.is_empty() {
             w.structure("xattrs");
-            w.array(None, x.conds.len() as u16);
+            w.array(None, x.conds.len());
             // upstream's list holds the conditions in reverse.
             for c in x.conds.iter().rev() {
-                w.strn(&c.name, None);
+                w.text(&c.name, None);
             }
             w.arrayend();
             w.structend();
@@ -501,7 +536,7 @@ fn write_profile(
     if p.rlimits.specified != 0 {
         w.structure("rlimits");
         w.u32(p.rlimits.specified);
-        w.array(None, p.rlimits.limits.len() as u16);
+        w.array(None, p.rlimits.limits.len());
         for l in p.rlimits.limits {
             w.u64(l);
         }
@@ -510,7 +545,7 @@ fn write_profile(
     }
     if !s.network_policydb() {
         if let (Some(t), true) = (net, s.network) {
-            w.array(Some("net_allowed_af"), t.len() as u16);
+            w.array(Some("net_allowed_af"), t.len());
             for e in t {
                 let allowed = e[0] & !e[2];
                 w.u16(allowed as u16);
@@ -572,9 +607,12 @@ fn units_of(
     let mut w = W::default();
     w.named_u32("version", version(s));
     if let Some(n) = ns {
-        w.strn(n, Some("namespace"));
+        w.text(n, Some("namespace"));
     }
     write_profile(&mut w, p, &name, s, net)?;
+    if let Some(e) = w.err {
+        return Err(e);
+    }
     out.push(Unit {
         name: name.clone(),
         namespace: ns.clone(),
@@ -593,9 +631,12 @@ fn units_of(
         let mut w = W::default();
         w.named_u32("version", version(s));
         if let Some(n) = &h.ns {
-            w.strn(n, Some("namespace"));
+            w.text(n, Some("namespace"));
         }
         write_profile(&mut w, h, &hname, s, net)?;
+        if let Some(e) = w.err {
+            return Err(e);
+        }
         out.push(Unit {
             name: hname.clone(),
             namespace: h.ns.clone(),
@@ -616,4 +657,31 @@ pub fn serialize(policy: &Policy, s: &Support) -> Result<Vec<Unit>, String> {
         units_of(p, None, &p.ns, s, policy.net_table.as_ref(), &mut out)?;
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::apparmor::{compile, MemResolver, Options};
+
+    fn written(text: &str) -> Result<usize, String> {
+        let p = compile(
+            &mut MemResolver::default(),
+            "t",
+            text.as_bytes().to_vec(),
+            &Options::default(),
+        )
+        .map_err(|e| e.to_string())?;
+        super::serialize(&p, &p.support).map(|u| u.len())
+    }
+
+    #[test]
+    fn what_the_format_cannot_hold_is_refused() {
+        assert_eq!(written("profile a { }"), Ok(1));
+        let mut w = super::W::default();
+        w.text(b"a\0b", None);
+        assert!(w.err.unwrap().contains("NUL"));
+        let long = format!("profile {} {{ }}", "n".repeat(70_000));
+        assert!(written(&long).unwrap_err().contains("too long"));
+        assert_eq!(written("/p { /x px -> :ns:b, }"), Ok(1));
+    }
 }
