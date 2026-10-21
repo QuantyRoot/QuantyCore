@@ -31,6 +31,7 @@ through and add a new entry, never silently edit history.
 - [ADR-038](#adr-038-runtimedefault-is-containerds-profile-rendered-the-same-way) RuntimeDefault is containerd's profile, rendered the same way
 - [ADR-039](#adr-039-what-the-first-outside-review-found-and-what-changed) What the first outside review found, and what changed
 - [ADR-040](#adr-040-quantydb-may-use-quantycore-under-mit-and-only-quantydb) QuantyDB may use QuantyCore under MIT, and only QuantyDB
+- [ADR-041](#adr-041-every-platform-builds-and-unix-only-parts-say-so) Every platform builds, and Unix-only parts say so
 
 ## ADR-001: Nothing outside the standard library, and QuantyRoot is not outside
 
@@ -1324,3 +1325,33 @@ that `cargo` and SPDX cannot express: `Cargo.toml` still says
 part of QuantyDB. The exception applies to every version that contains
 the file, so removing it later would only affect versions released after
 that.
+## ADR-041: Every platform builds, and Unix-only parts say so
+
+0.1.0 reached crates.io without having been compiled anywhere but Linux.
+`src/apparmor/features.rs` and `src/apparmor/source.rs` turned paths into
+bytes with `std::os::unix::ffi::OsStrExt`, and `src/grpc.rs` named
+`UnixStream` unconditionally, so the crate did not build on Windows.
+ADR-001 rule 1 asks for the same gates QuantyDB runs, and QuantyDB builds
+and tests on macOS and Windows; this crate did not.
+
+**What changed.** Path to bytes uses `OsStr::as_encoded_bytes`, which is
+the raw bytes on Unix. Bytes to path is the raw bytes on Unix; elsewhere
+a profile path that is not UTF-8 is a file that cannot exist there, and
+is reported as not found. The gRPC server's Unix socket listener is
+compiled on Unix only, since that is where the standard library has
+Unix sockets. Code for AppArmor stays on every platform: compiling a
+profile is useful anywhere, and loading one fails at the file system
+like any other missing file.
+
+**Tests that run on Unix only, and why:** the gRPC tests talk to the
+server over socket pairs; the tar tests compare with the system's `tar`
+and make symlinks; the AppArmor kernel test needs Linux. Every other test
+runs on all three.
+
+**Checked by:** a CI job on macOS and Windows running clippy with
+`-D warnings` and the whole test suite, as QuantyDB's `portable` job does.
+0.1.0 stays on the index for anyone on Linux who already uses it; 0.1.1
+is what builds everywhere.
+
+**Cost:** two more runners per push, and Windows paths that are not
+UTF-8 cannot be named in a profile.

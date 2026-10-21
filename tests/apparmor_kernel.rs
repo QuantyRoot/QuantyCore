@@ -7,6 +7,9 @@
 //! `QUANTY_APPARMOR_KERNEL` is set, as in the CI job on an Ubuntu runner;
 //! with `QUANTY_VECTORS_REQUIRED` set and no kernel, it fails.
 
+// securityfs, procfs and AppArmor are Linux.
+#![cfg(target_os = "linux")]
+
 use std::io::Read;
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};

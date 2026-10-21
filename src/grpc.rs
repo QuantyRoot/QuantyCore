@@ -94,6 +94,7 @@ macro_rules! socket {
     };
 }
 
+#[cfg(unix)]
 socket!(std::os::unix::net::UnixStream);
 socket!(std::net::TcpStream);
 
@@ -410,6 +411,7 @@ impl Server {
     }
 
     /// Accepts connections forever, one thread each.
+    #[cfg(unix)]
     pub fn serve_unix(
         self: Arc<Self>,
         listener: std::os::unix::net::UnixListener,
@@ -729,6 +731,7 @@ pub fn call<S: Read + Write>(mut sock: S, method: &str, request: &[u8]) -> Resul
 
 /// Accepts connections on a Unix socket forever, one thread each, with
 /// the default [`Options`].
+#[cfg(unix)]
 pub fn serve_unix(
     listener: std::os::unix::net::UnixListener,
     service: Arc<dyn Service>,
@@ -736,7 +739,8 @@ pub fn serve_unix(
     Server::new(service, Options::default()).serve_unix(listener)
 }
 
-#[cfg(test)]
+// The tests talk to the server over socket pairs, which only Unix has.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::hpack;

@@ -29,6 +29,26 @@ jobs:
       - name: tests
         run: cargo test --workspace
 
+  # 0.1.0 went to crates.io without ever being compiled anywhere but
+  # Linux, and did not build on Windows. ADR-001 asks for the same gates
+  # QuantyDB runs, and QuantyDB builds and tests on both of these.
+  portable:
+    name: build and test on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          components: clippy
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: tests
+        run: cargo test --workspace
+
   hpack-corpus:
     name: HPACK against 14 recorded encoders
     runs-on: ubuntu-latest

@@ -143,7 +143,6 @@ impl Features {
 
 fn flatten(dir: &Path, out: &mut Vec<u8>, depth: usize) -> std::io::Result<()> {
     use std::io::Read;
-    use std::os::unix::ffi::OsStrExt;
     if depth > 16 {
         return Err(std::io::Error::other("features tree too deep"));
     }
@@ -153,7 +152,7 @@ fn flatten(dir: &Path, out: &mut Vec<u8>, depth: usize) -> std::io::Result<()> {
         .collect();
     names.sort();
     for name in names {
-        let n = name.as_bytes();
+        let n = name.as_encoded_bytes();
         if n.is_empty() || n[0] == b'.' {
             continue;
         }

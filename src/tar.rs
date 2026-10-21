@@ -500,7 +500,8 @@ fn numeric(field: &[u8]) -> Result<i64, Error> {
     Ok(x)
 }
 
-#[cfg(test)]
+// The tests compare with the system's tar and make symlinks.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::inflate::GzipReader;

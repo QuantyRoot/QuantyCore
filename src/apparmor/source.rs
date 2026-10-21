@@ -5,7 +5,7 @@
 //! the file system the way `apparmor_parser` does.
 
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// Where a piece of text is: the file, and a byte offset in it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -80,11 +80,10 @@ impl FsResolver {
     }
 
     pub fn new(search: Vec<PathBuf>, base: impl Into<PathBuf>) -> FsResolver {
-        use std::os::unix::ffi::OsStrExt;
         let search = search
             .into_iter()
             .map(|p| {
-                let mut b = p.as_os_str().as_bytes().to_vec();
+                let mut b = p.as_os_str().as_encoded_bytes().to_vec();
                 while b.len() > 1 && b.last() == Some(&b'/') {
                     b.pop();
                 }
@@ -96,6 +95,20 @@ impl FsResolver {
             search,
             base: base.into(),
         }
+    }
+}
+
+/// The path a profile names. On Unix any bytes; elsewhere paths are
+/// Unicode, so a name that is not UTF-8 cannot exist there.
+fn path_of(b: &[u8]) -> Option<PathBuf> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        Some(PathBuf::from(std::ffi::OsStr::from_bytes(b)))
+    }
+    #[cfg(not(unix))]
+    {
+        std::str::from_utf8(b).ok().map(PathBuf::from)
     }
 }
 
@@ -111,8 +124,9 @@ impl Resolver for FsResolver {
 
     fn open(&mut self, path: &[u8]) -> Opened {
         use std::io::Read;
-        use std::os::unix::ffi::OsStrExt;
-        let p = Path::new(std::ffi::OsStr::from_bytes(path));
+        let Some(p) = path_of(path) else {
+            return Opened::NotFound;
+        };
         let full = self.base.join(p);
         let meta = match std::fs::metadata(&full) {
             Ok(m) => m,
@@ -125,7 +139,7 @@ impl Resolver for FsResolver {
             };
             for e in rd.flatten() {
                 if std::fs::metadata(e.path()).is_ok_and(|m| m.is_file()) {
-                    names.push(e.file_name().as_bytes().to_vec());
+                    names.push(e.file_name().as_encoded_bytes().to_vec());
                 }
             }
             names.sort();
