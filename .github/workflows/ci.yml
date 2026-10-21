@@ -230,13 +230,16 @@ jobs:
       - name: AppArmor is enabled
         run: |
           cat /sys/module/apparmor/parameters/enabled
-          sudo cat /sys/kernel/security/apparmor/features/policy/versions/* || true
+          sudo find /sys/kernel/security/apparmor/features -maxdepth 2 | sort
           uname -r
       - name: load, confine, check, remove
         run: cargo test --release --test apparmor_kernel -- --nocapture --test-threads 1
         env:
           QUANTY_APPARMOR_KERNEL: 1
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo -E
+      - name: what the kernel refused
+        if: always()
+        run: sudo dmesg | grep -i apparmor | tail -40
 
   apparmor-fuzz:
     name: AppArmor compiler fuzzed
@@ -255,3 +258,31 @@ jobs:
           QUANTY_APPARMOR_TST: ${{ runner.temp }}/apparmor/parser/tst
           QUANTY_FUZZ_SEED: ${{ github.run_id }}
           QUANTY_FUZZ_ITERS: 60000
+
+  apparmor-mutants:
+    name: AppArmor tests fail on deliberately broken code
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      APPARMOR_COMMIT: 909affc32a13d14ae3a7ccf44d325ae63ce11baf
+      QUANTY_VECTORS_REQUIRED: 1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+      - name: tools to build the reference parser
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends autoconf-archive bison flex gettext libzstd-dev
+      - name: fetch upstream at a pinned commit and build its parser
+        run: tests/apparmor_fetch.sh "$RUNNER_TEMP/apparmor" build
+      - name: fetch the profile corpus at pinned versions
+        run: tests/apparmor_fetch_corpus.sh "$RUNNER_TEMP/corpus" "$RUNNER_TEMP/apparmor"
+      - name: every mutant must be killed by its test
+        run: tests/apparmor_mutants.py
+        env:
+          PYTHONDONTWRITEBYTECODE: 1
+          QUANTY_APPARMOR_TST: ${{ runner.temp }}/apparmor/parser/tst
+          QUANTY_APPARMOR_CORPUS: ${{ runner.temp }}/corpus
+          QUANTY_APPARMOR_PARSER: ${{ runner.temp }}/apparmor/parser/apparmor_parser
+          LD_LIBRARY_PATH: ${{ runner.temp }}/apparmor/libraries/libapparmor/src/.libs

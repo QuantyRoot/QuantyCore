@@ -397,6 +397,15 @@ mod tests {
             choose(Probe::Failed, Param::Unread(Probe::Denied), Param::No),
             a(Some(Stacking), Some(Legacy))
         );
+        // A directory policy hides still counts as present.
+        assert_eq!(
+            choose(Probe::Denied, Param::Unread(Probe::Denied), Param::No),
+            a(Some(Stacking), Some(Legacy))
+        );
+        assert_eq!(
+            choose(Probe::Denied, Param::Yes, Param::No),
+            a(Some(Legacy), None)
+        );
     }
 
     #[test]

@@ -22,10 +22,11 @@ const EACCES: i32 = 13;
 const EPERM: i32 = 1;
 const OTHER: i32 = 250;
 const WRONG_LABEL: i32 = 251;
+const SPAWN_FAILED: i32 = 252;
 
-/// Per feature set: 24 operations in `checks`, a refused second load,
+/// Per feature set: 25 operations in `checks`, a refused second load,
 /// eight profiles listed and none left after removing.
-const MIN_CHECKS: usize = 2 * 34;
+const MIN_CHECKS: usize = 2 * 35;
 
 /// What the confined copy does: one operation, answered by the exit
 /// code, which is the errno when it fails.
@@ -61,14 +62,23 @@ fn run_op(op: &str) -> std::io::Result<()> {
             TcpStream::connect((Ipv4Addr::LOCALHOST, arg.parse::<u16>().unwrap())).map(|_| ())
         }
         "chown" => std::os::unix::fs::chown(arg, Some(1), Some(1)),
+        "spawn" => {
+            let st = helper_command("sleep").status()?;
+            if !st.success() {
+                std::process::exit(SPAWN_FAILED);
+            }
+            Ok(())
+        }
         "signal" => {
-            let mut child = helper_command("sleep").spawn()?;
+            let Ok(mut child) = helper_command("sleep").spawn() else {
+                std::process::exit(SPAWN_FAILED);
+            };
             let r = child.kill();
             child.wait()?;
             r
         }
         "sleep" => {
-            std::thread::sleep(std::time::Duration::from_secs(2));
+            std::thread::sleep(std::time::Duration::from_millis(500));
             Ok(())
         }
         _ => std::process::exit(OTHER),
@@ -143,7 +153,7 @@ fn profiles_text(tag: &str, dir: &Path) -> String {
     )
 }
 
-fn checks(run: &mut Run, tag: &str, dir: &Path, port: u16) {
+fn checks(run: &mut Run, tag: &str, dir: &Path, port: u16, legacy_net: bool) {
     let p = |n: &str| format!("quanty_aa_{n}_{tag}");
     let f = |n: &str| dir.join(n).display().to_string();
     for n in [
@@ -163,11 +173,20 @@ fn checks(run: &mut Run, tag: &str, dir: &Path, port: u16) {
     run.expect(&p("files"), &format!("write:{}", f("ro")), EACCES);
     run.expect(&p("files"), &format!("read:{}", f("ro")), 0);
     run.expect(&p("net_allow"), &format!("connect:{port}"), 0);
-    run.expect(&p("net_deny"), &format!("connect:{port}"), EACCES);
+    // The old network table is enforced only by kernels that still have
+    // the interface for it; upstream writes it all the same.
+    let old_table_only = tag == "d";
+    let refused = if old_table_only && !legacy_net {
+        0
+    } else {
+        EACCES
+    };
+    run.expect(&p("net_deny"), &format!("connect:{port}"), refused);
     run.expect(&p("net_deny"), &format!("read:{}", f("open")), 0);
     run.expect(&p("cap_allow"), &format!("chown:{}", f("own")), 0);
     // A capability AppArmor refuses fails the way a missing one does.
     run.expect(&p("cap_deny"), &format!("chown:{}", f("own")), EPERM);
+    run.expect(&p("sig_allow"), "spawn", 0);
     run.expect(&p("sig_allow"), "signal", 0);
     run.expect(&p("sig_deny"), "signal", EACCES);
     run.expect(&p("sig_deny"), &format!("read:{}", f("open")), 0);
@@ -198,6 +217,8 @@ fn kernel() {
     let fs = Securityfs::system();
     let kernel = fs.features().expect("AppArmor's securityfs is readable");
     let dir = scratch();
+    let legacy_net = kernel.supports("network/af_mask");
+    eprintln!("old network table enforced: {legacy_net}");
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     std::thread::spawn(move || {
@@ -239,7 +260,7 @@ fn kernel() {
                 ));
             }
         }
-        checks(&mut run, tag, &dir, port);
+        checks(&mut run, tag, &dir, port, legacy_net);
         for u in &units {
             fs.remove(&fqname(u)).unwrap();
         }
