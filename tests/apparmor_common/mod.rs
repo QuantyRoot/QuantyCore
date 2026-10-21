@@ -139,6 +139,9 @@ pub struct Tables {
     pub def: Vec<u32>,
     pub next: Vec<u32>,
     pub check: Vec<u32>,
+    /// The permissions table the accept entries index, on kernels that
+    /// take one: fourteen values per entry, starting with a reserved one.
+    pub permstable: Option<Vec<[u32; 14]>>,
 }
 
 const DIFF_ENCODE: u32 = 0x8000_0000;
@@ -207,6 +210,42 @@ impl Tables {
 
     pub fn states(&self) -> usize {
         self.base.len()
+    }
+
+    /// What the kernel's verify_dfa and verify_perms check before they
+    /// accept an automaton.
+    pub fn verify(&self) -> Result<(), String> {
+        let states = self.states();
+        if states == 0 {
+            return Err("no states".into());
+        }
+        if !self.ec.is_empty() && self.ec.len() != 256 {
+            return Err("equivalence table not 256 entries".into());
+        }
+        let trans = self.next.len();
+        for i in 0..states {
+            let b = self.base[i];
+            if b & DIFF_ENCODE == 0 && self.def[i] as usize >= states {
+                return Err(format!("state {i}: default out of range"));
+            }
+            if b & 0xff00_0000 & !(DIFF_ENCODE | OOB_TRANSITION) != 0 {
+                return Err(format!("state {i}: unknown base flags"));
+            }
+            if (b & 0x00ff_ffff) as usize + 255 >= trans {
+                return Err(format!("state {i}: base too close to the end"));
+            }
+        }
+        for i in 0..trans {
+            if self.next[i] as usize >= states || self.check[i] as usize >= states {
+                return Err(format!("transition {i} out of range"));
+            }
+        }
+        if let Some(p) = &self.permstable {
+            if let Some(a) = self.accept.iter().find(|&&a| a as usize >= p.len()) {
+                return Err(format!("accept {a} beyond the permissions table"));
+            }
+        }
+        Ok(())
     }
 
     /// The kernel's match_char, with the state chain bounded.
@@ -288,6 +327,7 @@ pub fn profiles(buf: &[u8]) -> Result<Vec<BinProfile>, String> {
         let mut in_policydb = false;
         let mut in_xtable = false;
         let mut last_name: Option<Vec<u8>> = None;
+        let mut pending_perms: Option<Vec<[u32; 14]>> = None;
         while depth > 0 {
             let t = v.get(i).ok_or("unterminated profile")?;
             i += 1;
@@ -295,6 +335,27 @@ pub fn profiles(buf: &[u8]) -> Result<Vec<BinProfile>, String> {
                 Tlv::Name(n) => {
                     last_name = Some(n.clone());
                     continue;
+                }
+                Tlv::Struct if last_name.as_deref() == Some(b"perms\0") => {
+                    let mut vals = Vec::new();
+                    loop {
+                        match v.get(i).ok_or("unterminated perms")? {
+                            Tlv::U32(x) => vals.push(*x),
+                            Tlv::StructEnd => break,
+                            _ => {}
+                        }
+                        i += 1;
+                    }
+                    i += 1;
+                    if vals.is_empty() || (vals.len() - 1) % 14 != 0 {
+                        return Err("malformed perms table".into());
+                    }
+                    pending_perms = Some(
+                        vals[1..]
+                            .chunks(14)
+                            .map(|c| c.try_into().unwrap())
+                            .collect(),
+                    );
                 }
                 Tlv::Struct => {
                     depth += 1;
@@ -313,7 +374,8 @@ pub fn profiles(buf: &[u8]) -> Result<Vec<BinProfile>, String> {
                     }
                 }
                 Tlv::Blob(b) if last_name.as_deref() == Some(b"aadfa\0") => {
-                    let tables = Tables::read(b)?;
+                    let mut tables = Tables::read(b)?;
+                    tables.permstable = pending_perms.take();
                     if in_policydb {
                         p.policydb = Some(tables);
                     } else if !seen_flags {
@@ -339,4 +401,57 @@ pub fn profiles(buf: &[u8]) -> Result<Vec<BinProfile>, String> {
 
 fn trim_nul(s: &[u8]) -> Vec<u8> {
     s.strip_suffix(b"\0").unwrap_or(s).to_vec()
+}
+
+/// The values of a policy stream with every automaton and permissions
+/// table taken out, one list per profile: what must be equal value for
+/// value between two compilers whose tables are packed differently.
+pub fn skeleton(buf: &[u8]) -> Result<Vec<Vec<Tlv>>, String> {
+    let v = tlv(buf)?;
+    let mut out: Vec<Vec<Tlv>> = Vec::new();
+    let mut depth = 0i32;
+    let mut i = 0;
+    while i < v.len() {
+        let t = &v[i];
+        if depth == 0 && *t == Tlv::Name(b"version\0".to_vec()) {
+            out.push(Vec::new());
+        }
+        let cur = out
+            .last_mut()
+            .ok_or("stream does not start with a version")?;
+        match t {
+            Tlv::Name(n) if n == b"perms\0" && v.get(i + 1) == Some(&Tlv::Struct) => {
+                let mut d = 0;
+                i += 1;
+                loop {
+                    match v.get(i).ok_or("unterminated perms")? {
+                        Tlv::Struct => d += 1,
+                        Tlv::StructEnd => {
+                            d -= 1;
+                            if d == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    i += 1;
+                }
+                cur.push(Tlv::Name(b"perms\0".to_vec()));
+            }
+            Tlv::Blob(_) if matches!(cur.last(), Some(Tlv::Name(n)) if n == b"aadfa\0") => {
+                cur.push(Tlv::Blob(Vec::new()));
+            }
+            Tlv::Struct => {
+                depth += 1;
+                cur.push(t.clone());
+            }
+            Tlv::StructEnd => {
+                depth -= 1;
+                cur.push(t.clone());
+            }
+            _ => cur.push(t.clone()),
+        }
+        i += 1;
+    }
+    Ok(out)
 }

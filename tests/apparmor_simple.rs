@@ -6,11 +6,8 @@
 //! and points `QUANTY_APPARMOR_TST` at `parser/tst`.
 //!
 //! Upstream runs each case through the whole parser and compiler, so a
-//! case can be refused at any stage. `check` grows stage by stage; until
-//! the last one exists, a case that must be refused but is accepted here
-//! is counted as pending, and the count may not grow past
-//! `MAX_PENDING`. A case that must be accepted and is refused always
-//! fails the test.
+//! case can be refused at any stage; `check` runs the same stages here.
+//! Every case must be decided as upstream decides it.
 
 mod apparmor_common;
 
@@ -26,9 +23,6 @@ const TODO_INVERTED: bool = true;
 
 /// Cases this crate deliberately decides differently. Path, reason.
 const DIFFERS_ON_PURPOSE: &[(&str, &str)] = &[];
-
-/// Refusals that later stages will add. Lowered with each stage.
-const MAX_PENDING: usize = 2_212;
 
 /// The suite at the pinned commit has 73737 cases; fewer means the
 /// checkout or the generation step went wrong.
@@ -58,7 +52,7 @@ fn simple_tests() {
     walk(&root, &mut paths);
     paths.sort();
 
-    let (mut checked, mut disabled, mut pending) = (0, 0, Vec::new());
+    let (mut checked, mut disabled, mut wrongly_accepted) = (0, 0, Vec::new());
     let mut wrongly_refused = Vec::new();
     let mut on_purpose_seen = 0;
     for path in &paths {
@@ -87,14 +81,14 @@ fn simple_tests() {
         match (expect_pass, result) {
             (true, Ok(())) | (false, Err(_)) => {}
             (true, Err(e)) => wrongly_refused.push(format!("{rel}: {e}")),
-            (false, Ok(())) => pending.push(rel),
+            (false, Ok(())) => wrongly_accepted.push(rel),
         }
     }
 
     eprintln!(
-        "{checked} cases checked, {disabled} disabled upstream, {} wrongly refused, {} refusals pending",
+        "{checked} cases checked, {disabled} disabled upstream, {} wrongly refused, {} wrongly accepted",
         wrongly_refused.len(),
-        pending.len()
+        wrongly_accepted.len()
     );
     assert!(
         checked + disabled >= MIN_CASES,
@@ -115,12 +109,15 @@ fn simple_tests() {
         "{} cases wrongly refused",
         wrongly_refused.len()
     );
-    if let Ok(out) = std::env::var("QUANTY_APPARMOR_PENDING_OUT") {
-        std::fs::write(out, pending.join("\n")).unwrap();
+    if let Ok(out) = std::env::var("QUANTY_APPARMOR_ACCEPTED_OUT") {
+        std::fs::write(out, wrongly_accepted.join("\n")).unwrap();
+    }
+    for p in wrongly_accepted.iter().take(50) {
+        eprintln!("accepted: {p}");
     }
     assert!(
-        pending.len() <= MAX_PENDING,
-        "{} cases accepted that must be refused, at most {MAX_PENDING} allowed",
-        pending.len()
+        wrongly_accepted.is_empty(),
+        "{} cases wrongly accepted",
+        wrongly_accepted.len()
     );
 }

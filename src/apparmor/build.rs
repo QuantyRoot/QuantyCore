@@ -7,6 +7,7 @@
 //! upstream runs the actions of both and reports errors in either.
 
 use super::ast::{self, ExecMode, Item, ProfileKeyword};
+use super::class::{self, ClassRule};
 use super::eval::Symtab;
 use super::features::{Features, DEFAULT_ABI};
 use super::model::{perm::*, *};
@@ -31,6 +32,11 @@ pub(crate) struct Builder<'s> {
     policy: Option<Features>,
     caps: Vec<CapEntry>,
     abi_rules: Vec<ast::Abi>,
+    /// upstream's per family network table as parsing leaves it: filled
+    /// by network rules, and freed whenever a block or a condition's
+    /// branch is deleted, since every profile object holds the shared
+    /// table and frees it when it goes.
+    net: Option<super::binary::NetTable>,
 }
 
 type R<T> = Result<T, Error>;
@@ -59,6 +65,7 @@ impl<'s> Builder<'s> {
                 })
                 .collect(),
             abi_rules: Vec::new(),
+            net: None,
         };
         let k = b.kernel.clone();
         b.add_caps(&k, true);
@@ -117,6 +124,10 @@ impl<'s> Builder<'s> {
         self.policy.clone().expect("set after the preamble")
     }
 
+    fn both(&self, f: &str) -> bool {
+        self.kernel.supports(f) && self.policy_features().supports(f)
+    }
+
     pub(crate) fn support(&self, limits: super::compile::dfa::Limits) -> super::compile::Support {
         let p = self.policy_features();
         let both = |f: &str| self.kernel.supports(f) && p.supports(f);
@@ -131,12 +142,44 @@ impl<'s> Builder<'s> {
         } else {
             0
         };
+        let k = |f: &str| self.kernel.supports(f);
         super::compile::Support {
             stacking: both("domain/stack"),
             domain_xattr: both("domain/attach_conditions/xattr"),
-            oob: self.kernel.supports("policy/outofband"),
+            oob: k("policy/outofband"),
             permstable32_version: permstable,
             limits,
+            policydb: k("file"),
+            abi_version: if k("policy/versions/v7") {
+                7
+            } else if k("policy/versions/v6") {
+                6
+            } else {
+                5
+            },
+            network: both("network"),
+            networkv8: both("network_v8"),
+            networkv9: both("network_v9"),
+            networkv9_skb: both("network_v9_skb"),
+            ifacev9_skb: both("network_v9_skb/iface"),
+            inetv8: both("network_v8/af_inet"),
+            inetv9: both("network_v9/af_inet"),
+            unixv7: both("network/af_unix"),
+            unixv9: both("network_v9/af_unix"),
+            mount: both("mount"),
+            detached_mount: k("mount/move_mount/detached"),
+            dbus: both("dbus"),
+            signal: both("signal"),
+            ptrace: both("ptrace"),
+            userns: both("namespaces/mask/userns_create"),
+            posix_mqueue: both("ipc/posix_mqueue"),
+            sysv_mqueue: both("ipc/sysv_mqueue"),
+            io_uring: both("io_uring"),
+            flag_interruptible: both("policy/profile/interruptible"),
+            flag_signal: both("policy/profile/kill.signal"),
+            flag_error: both("policy/profile/error"),
+            flag_disconnected_ipc: both("domain/disconnected.ipc"),
+            identity_names: both("domain/identity"),
         }
     }
 
@@ -254,16 +297,21 @@ impl<'s> Builder<'s> {
                     ),
                 ));
             }
-            policy.profiles.insert(key, prof);
+            policy.profiles.insert(key, *prof);
         }
+        policy.net_table = self.net.take();
         Ok(policy)
     }
 
-    /// A profile, hat or child profile, with its whole body. Only a hat
-    /// inside a profile is refused xattrs; upstream does not check a top
-    /// level `^name`.
-    fn profile(&mut self, p: &ast::Profile, nested: bool) -> R<Profile> {
-        let mut prof = self.rules(&p.body, p.span)?;
+    /// What upstream does once a profile's body is built: its name,
+    /// attachment, conditions and flags. Only a hat inside a profile is
+    /// refused xattrs; upstream does not check a top level `^name`.
+    fn finish_profile(
+        &mut self,
+        p: &ast::Profile,
+        nested: bool,
+        mut prof: Box<Profile>,
+    ) -> R<Box<Profile>> {
         let (stack, ns, name) = parse_label(&p.name)
             .map_err(|m| self.err(p.span, m.replace("%s", &String::from_utf8_lossy(&p.name))))?;
         if stack {
@@ -362,26 +410,19 @@ impl<'s> Builder<'s> {
         Ok(())
     }
 
-    /// The rules of one block: a profile body, a prefixed block or a
-    /// branch of a condition. Each gets a fresh profile, as upstream's
-    /// grammar starts one for every block.
-    fn rules(&mut self, items: &[Item], span: Span) -> R<Profile> {
-        let mut prof = Profile::empty(span);
-        for item in items {
-            self.item(&mut prof, item)?;
-        }
-        Ok(prof)
-    }
-
-    fn item(&mut self, prof: &mut Profile, item: &Item) -> R<()> {
+    /// One item of a block, in the block's profile. Items that open a
+    /// block of their own return it, to be built before this one
+    /// continues.
+    fn item<'a>(&mut self, prof: &mut Profile, item: &'a Item) -> R<Option<Frame<'a>>> {
         match item {
             Item::Abi(a) => {
                 self.abi_rules.push(a.clone());
-                Ok(())
+                Ok(None)
             }
             Item::Rule { prefix, rule, span } => {
                 let prefix = self.prefix(prefix)?;
-                self.rule(prof, prefix, rule, *span)
+                self.rule(prof, prefix, rule, *span)?;
+                Ok(None)
             }
             Item::Block {
                 prefix,
@@ -392,51 +433,124 @@ impl<'s> Builder<'s> {
                 if prefix.priority != 0 {
                     return Err(self.err(*span, "priority is not allowed on rule blocks"));
                 }
-                // Only the file rules of a prefixed block survive in
-                // upstream; everything else in it is dropped with the
-                // block.
-                let block = self.rules(items, *span)?;
-                for mut e in block.entries {
-                    entry_add_prefix(&mut e, &prefix).map_err(|m| self.err(e.span, m))?;
-                    prof.add_entry(e);
-                }
-                Ok(())
+                Ok(Some(Frame::body(items, *span, Done::Block(prefix))))
             }
             Item::Hat(p) | Item::Child(p) => {
-                let hat = self.profile(p, true)?;
-                add_hat(prof, hat).map_err(|m| self.err(p.span, m))
+                Ok(Some(Frame::body(&p.body, p.span, Done::Profile(p, true))))
             }
             Item::If(i) => {
-                if let Some(chosen) = self.cond(i)? {
-                    self.merge(prof, chosen)?;
-                }
-                Ok(())
+                let truth = self.truth(i)?;
+                Ok(Some(Frame::body(&i.then, i.span, Done::Then(i, truth))))
             }
             Item::Rlimit {
                 resource,
                 value,
                 unit,
                 span,
-            } => self.rlimit(prof, resource, value, unit.as_deref(), *span),
+            } => {
+                self.rlimit(prof, resource, value, unit.as_deref(), *span)?;
+                Ok(None)
+            }
         }
     }
 
-    fn cond(&mut self, i: &ast::If) -> R<Option<Profile>> {
-        let truth = self.symtab.eval(&i.cond).map_err(|m| self.err(i.span, m))?;
-        let then = self.rules(&i.then, i.span)?;
-        let otherwise = match &i.otherwise {
-            None => None,
-            Some(ast::Else::Block(b)) => Some(self.rules(b, i.span)?),
-            Some(ast::Else::If(inner)) => self.cond(inner)?,
+    /// Only the file rules of a prefixed block survive in upstream;
+    /// everything else in it is dropped with the block.
+    fn block(&mut self, prof: &mut Profile, prefix: Prefix, block: Box<Profile>) -> R<()> {
+        for mut e in block.entries {
+            entry_add_prefix(&mut e, &prefix).map_err(|m| self.err(e.span, m))?;
+            prof.add_entry(e);
+        }
+        Ok(())
+    }
+
+    fn truth(&mut self, i: &ast::If) -> R<bool> {
+        self.symtab.eval(&i.cond).map_err(|m| self.err(i.span, m))
+    }
+
+    /// A profile, hat or child profile, with its whole body. The blocks
+    /// nest as deep as the parser allows, so they are built from an
+    /// explicit stack, in the order upstream's grammar builds them: a
+    /// condition is evaluated, then its branch, then the branch after
+    /// `else`, each in a profile of its own.
+    fn profile(&mut self, p: &ast::Profile, nested: bool) -> R<Box<Profile>> {
+        let mut stack = vec![Frame::body(&p.body, p.span, Done::Profile(p, nested))];
+        loop {
+            let Some(Frame::Body { items, prof, .. }) = stack.last_mut() else {
+                unreachable!("the top of the stack is a block being built");
+            };
+            if let Some(item) = items.next() {
+                if let Some(f) = self.item(prof, item)? {
+                    stack.push(f);
+                }
+                continue;
+            }
+            let Some(Frame::Body { prof, done, .. }) = stack.pop() else {
+                unreachable!("checked above");
+            };
+            match done {
+                Done::Profile(p, nested) => {
+                    let prof = self.finish_profile(p, nested, prof)?;
+                    match stack.last_mut() {
+                        None => return Ok(prof),
+                        Some(Frame::Body { prof: parent, .. }) => {
+                            add_hat(parent, prof).map_err(|m| self.err(p.span, m))?;
+                        }
+                        Some(Frame::Cond { .. }) => unreachable!("a profile is an item of a block"),
+                    }
+                }
+                Done::Block(prefix) => {
+                    let Some(Frame::Body { prof: parent, .. }) = stack.last_mut() else {
+                        unreachable!("a block is an item of a block");
+                    };
+                    self.block(parent, prefix, prof)?;
+                    self.net = None;
+                }
+                Done::Then(i, truth) => match &i.otherwise {
+                    None => self.deliver(&mut stack, truth.then_some(prof))?,
+                    Some(ast::Else::Block(b)) => {
+                        stack.push(Frame::body(b, i.span, Done::Else(truth, prof)))
+                    }
+                    Some(ast::Else::If(inner)) => {
+                        stack.push(Frame::Cond { truth, then: prof });
+                        let t = self.truth(inner)?;
+                        stack.push(Frame::body(&inner.then, inner.span, Done::Then(inner, t)));
+                    }
+                },
+                Done::Else(truth, then) => {
+                    let chosen = if truth { then } else { prof };
+                    self.deliver(&mut stack, Some(chosen))?;
+                }
+            }
+        }
+    }
+
+    /// Hands the branch a condition chose, after the conditions waiting
+    /// on it have chosen, to the block the condition is in.
+    fn deliver(&mut self, stack: &mut Vec<Frame<'_>>, mut chosen: Option<Box<Profile>>) -> R<()> {
+        // Every condition deletes at least one branch.
+        self.net = None;
+        while let Some(Frame::Cond { .. }) = stack.last() {
+            let Some(Frame::Cond { truth, then }) = stack.pop() else {
+                unreachable!("checked above");
+            };
+            chosen = if truth { Some(then) } else { chosen };
+        }
+        let Some(Frame::Body { prof, .. }) = stack.last_mut() else {
+            unreachable!("a condition is an item of a block");
         };
-        Ok(if truth { Some(then) } else { otherwise })
+        if let Some(c) = chosen {
+            self.merge(prof, c)?;
+        }
+        Ok(())
     }
 
     /// Upstream's merge_policy for a chosen branch: its entries go after
     /// the existing ones, capabilities, rules and hats are combined.
     /// Resource limits set inside the branch are not carried over, and
     /// neither is whether it used prompt rules, as upstream does.
-    fn merge(&mut self, prof: &mut Profile, b: Profile) -> R<()> {
+    fn merge(&mut self, prof: &mut Profile, b: Box<Profile>) -> R<()> {
+        let b = *b;
         prof.entries.extend(b.entries);
         prof.flags.audit |= b.flags.audit;
         prof.caps.allow |= b.caps.allow;
@@ -645,11 +759,73 @@ impl<'s> Builder<'s> {
             A::All if prefix.owner != Owner::Unspecified => {
                 return Err(self.err(span, "owner prefix not allowed on all rules"));
             }
-            other => prof.rules.push(PolicyRule::Pending {
-                rule: other.clone(),
-                prefix,
-                span,
-            }),
+            A::All => prof.rules.push(PolicyRule::All { prefix, span }),
+            A::Signal { perms, conds } => {
+                let r = class::signal::Signal::new(perms, conds, prefix)
+                    .map_err(|m| self.err(span, m))?;
+                push_class(prof, ClassRule::Signal(r), span);
+            }
+            A::Ptrace { perms, conds } => {
+                let r = class::ptrace::Ptrace::new(perms, conds, prefix)
+                    .map_err(|m| self.err(span, m))?;
+                push_class(prof, ClassRule::Ptrace(r), span);
+            }
+            A::Userns { perms, conds } => {
+                let r = class::userns::Userns::new(perms, conds, prefix)
+                    .map_err(|m| self.err(span, m))?;
+                push_class(prof, ClassRule::Userns(r), span);
+            }
+            A::Dbus { perms, conds, peer } => {
+                let r = class::dbus::Dbus::new(perms, conds, peer, prefix)
+                    .map_err(|m| self.err(span, m))?;
+                push_class(prof, ClassRule::Dbus(r), span);
+            }
+            A::Mqueue { perms, conds, name } => {
+                let r = class::mqueue::Mqueue::new(perms, conds, name, prefix)
+                    .map_err(|m| self.err(span, m))?;
+                push_class(prof, ClassRule::Mqueue(r), span);
+            }
+            A::IoUring { perms, conds, list } => {
+                let r = class::io_uring::IoUring::new(perms, conds, list, prefix)
+                    .map_err(|m| self.err(span, m))?;
+                push_class(prof, ClassRule::IoUring(r), span);
+            }
+            A::Unix { perms, conds, peer } => {
+                let r = class::unix::Unix::new(perms, conds, peer, prefix)
+                    .map_err(|m| self.err(span, m))?;
+                push_class(prof, ClassRule::Unix(r), span);
+            }
+            A::Network {
+                perms,
+                words,
+                conds,
+                peer,
+            } => {
+                let r = class::network::Network::new(perms, words, conds, peer, prefix)
+                    .map_err(|m| self.err(span, m))?;
+                if !(self.both("network_v8") || self.both("network_v9")) {
+                    r.update_compat(&mut self.net);
+                }
+                // upstream's grammar adds a unix rule for every AF_UNIX
+                // entry, with the prefix's audit and mode as written.
+                for t in r.unix_types() {
+                    let u = class::unix::Unix::implied(t, prefix.audit, prefix.mode)
+                        .map_err(|m| self.err(span, m))?;
+                    push_class(prof, ClassRule::Unix(u), span);
+                }
+                push_class(prof, ClassRule::Network(r), span);
+            }
+            A::Mount {
+                kind,
+                conds,
+                source,
+                dest,
+                transition,
+            } => {
+                let r = class::mount::Mount::new(*kind, conds, source, dest, transition, prefix)
+                    .map_err(|m| self.err(span, m))?;
+                push_class(prof, ClassRule::Mount(r), span);
+            }
         }
         Ok(())
     }
@@ -979,7 +1155,49 @@ pub(crate) fn entry_add_prefix(e: &mut Entry, p: &Prefix) -> Result<(), String> 
     check_x_qualifier(e)
 }
 
-fn add_hat(prof: &mut Profile, hat: Profile) -> Result<(), String> {
+/// What to do with a block's profile once its items are built.
+enum Done<'a> {
+    Profile(&'a ast::Profile, bool),
+    Block(Prefix),
+    /// The `then` branch of a condition, and whether the condition held.
+    Then(&'a ast::If, bool),
+    /// The `else` block, with the condition and its `then` branch.
+    Else(bool, Box<Profile>),
+}
+
+enum Frame<'a> {
+    Body {
+        items: std::slice::Iter<'a, Item>,
+        prof: Box<Profile>,
+        done: Done<'a>,
+    },
+    /// A condition whose `then` branch is built, waiting for the chain
+    /// of `else if` after it to choose.
+    Cond { truth: bool, then: Box<Profile> },
+}
+
+impl<'a> Frame<'a> {
+    fn body(items: &'a [Item], span: Span, done: Done<'a>) -> Frame<'a> {
+        Frame::Body {
+            items: items.iter(),
+            prof: boxed_empty(span),
+            done,
+        }
+    }
+}
+
+fn push_class(prof: &mut Profile, rule: ClassRule, span: Span) {
+    prof.rules.push(PolicyRule::Class {
+        rule: Box::new(rule),
+        span,
+    });
+}
+
+fn boxed_empty(span: Span) -> Box<Profile> {
+    Box::new(Profile::empty(span))
+}
+
+fn add_hat(prof: &mut Profile, hat: Box<Profile>) -> Result<(), String> {
     let key = (hat.ns.clone(), hat.name.clone());
     if prof.hats.contains_key(&key) {
         return Err(format!(

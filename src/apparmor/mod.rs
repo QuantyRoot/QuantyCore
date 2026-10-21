@@ -6,14 +6,18 @@
 //! compiled profile grants what upstream's would grant.
 
 pub mod ast;
+pub mod binary;
 pub(crate) mod build;
+pub mod class;
 pub mod compile;
 pub(crate) mod eval;
 pub mod features;
+pub mod kernel;
 pub(crate) mod lexer;
 pub mod model;
 pub mod parser;
 pub(crate) mod process;
+pub mod runtime_default;
 pub(crate) mod scan;
 pub mod source;
 pub(crate) mod tables;
@@ -65,8 +69,11 @@ pub fn compile(
         symtab: b.symtab,
         aliases: b.aliases,
         support,
+        net: policy.net_table.take(),
     };
     p.policy(&mut policy)?;
+    policy.net_table = p.net.take();
+    policy.support = p.support;
     Ok(policy)
 }
 
@@ -79,4 +86,44 @@ pub fn check(
     opts: &Options,
 ) -> Result<(), Error> {
     compile(resolver, name, text, opts).map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Conditions, hats and child profiles nested as deep as the parser
+    /// allows compile in a thread with a 2 MiB stack, the default for
+    /// threads a caller spawns.
+    #[test]
+    fn deepest_nesting_fits_a_small_stack() {
+        let n = 1020;
+        let mut texts = Vec::new();
+        let mut s = String::from("$a = true\n/p {\n");
+        s.push_str(&"if $a {\n".repeat(n));
+        s.push_str("/x r,\nsignal,\n");
+        s.push_str(&"} else { /y r, }\n".repeat(n));
+        s.push_str("}\n");
+        texts.push(s);
+        for open in ["profile c{} {\n", "^h{} {\n"] {
+            let mut s = String::from("/p {\n");
+            for i in 0..n {
+                s.push_str(&open.replace("{}", &i.to_string()));
+            }
+            s.push_str("/x r,\nsignal,\n");
+            s.push_str(&"}\n".repeat(n + 1));
+            texts.push(s);
+        }
+        for t in texts {
+            std::thread::Builder::new()
+                .stack_size(2 << 20)
+                .spawn(move || {
+                    let mut r = MemResolver::default();
+                    compile(&mut r, "deep", t.into_bytes(), &Options::default()).unwrap();
+                })
+                .unwrap()
+                .join()
+                .unwrap();
+        }
+    }
 }

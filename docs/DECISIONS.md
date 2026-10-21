@@ -26,6 +26,9 @@ through and add a new entry, never silently edit history.
 - [ADR-033](#adr-033-the-profile-language-is-read-the-way-flex-and-bison-read-it) The profile language is read the way flex and bison read it
 - [ADR-034](#adr-034-variables-conditions-and-rule-semantics-follow-upstreams-order) Variables, conditions and rule semantics follow upstream's order
 - [ADR-035](#adr-035-the-automaton-is-upstreams-language-built-by-other-steps) The automaton is upstream's language, built by other steps
+- [ADR-036](#adr-036-the-policy-rule-kinds-follow-upstreams-classes-quirks-included) The policy rule kinds follow upstream's classes, quirks included
+- [ADR-037](#adr-037-the-binary-policy-is-upstreams-values-with-tables-of-our-own) The binary policy is upstream's values with tables of our own
+- [ADR-038](#adr-038-runtimedefault-is-containerds-profile-rendered-the-same-way) RuntimeDefault is containerd's profile, rendered the same way
 
 ## ADR-001: Nothing outside the standard library, and QuantyRoot is not outside
 
@@ -1091,3 +1094,159 @@ combination, conflicts, minimization and limits.
 **Cost:** an automaton is compared with upstream's only through its
 behaviour, so a difference shows up as a differing state, not as a
 differing step, and the test needs upstream built from source.
+
+## ADR-036: The policy rule kinds follow upstream's classes, quirks included
+
+Signal, ptrace, user namespace, message queue, io_uring, D-Bus, unix
+socket, network and mount rules are compiled into the policy automaton
+the way upstream's classes compile them (`signal.cc`, `af_unix.cc` and
+so on): each module in `src/apparmor/class` checks what the class's
+constructor checks while the profile is built, expands variables where
+the class does, joins rules the way upstream's merge_rules joins them,
+and writes the same expressions, byte for byte, into the automaton.
+
+**Behaviour kept although it looks wrong,** because the kernel would
+see a different policy otherwise:
+
+- Rules of a kind that differ only in their permissions are joined, as
+  upstream's merge_rules does. For mount rules this changes the policy:
+  `mount,` `umount,` and `pivot_root,` in one profile become one rule
+  with all three permissions, and every pattern each of them writes
+  carries all three.
+- An `all` rule's prefix is applied twice, once when the rule is made
+  and once to each rule it implies, so `deny all` ends up unquieted and
+  `audit deny all` quieted.
+- A rule for message queues of either kind with a label writes the
+  label into one buffer for both kinds without clearing it in between,
+  so its System V rules match the label written twice.
+- io_uring rules never expand variables in their label, and do not
+  check the name of the condition group after them.
+- A `network` rule naming AF_UNIX adds unix rules with the prefix as
+  written, not as add_prefix leaves it; an allowing unix rule always
+  adds a network rule for its family and type.
+- The mediates rules for unix sockets are written for both the v9 and
+  the v7 encoding when the kernel has both: upstream's `if (v9 && !add)
+  goto out; else if (v7 ...)` takes the `else` after every successful
+  v9 add.
+- A feature path is looked up the way libapparmor's walk_one looks it
+  up, which also finds a component at the end of a longer name:
+  `policy/versions` finds `notify_versions` in upstream's own
+  `abi/5.0`, so a kernel with that feature set counts as policy
+  version 5 and gets no mediates rule for files.
+- `signal` reads `rtmin+` alone as `rtmin+0` and ignores anything after
+  the number; `pivot_root` checks only the last of its conditions;
+  mount options meant for matching mount data are parsed but never
+  encoded.
+
+**Stack depth.** The profile builder and the per profile processing
+walk blocks, conditions and hats from explicit stacks, so the depth the
+parser allows (1,024) needs no more stack than a flat profile. A test
+compiles conditions, child profiles and hats nested that deep on a
+thread with a 2 MiB stack, in debug and in release builds.
+
+**Checked by:** `tests/apparmor_diff.rs` against three kernels:
+upstream's test feature set (accept tables, legacy networking, no
+message queues), and upstream's `abi/5.0` and `abi/5.0-interface`
+(permissions table, inet sockets with addresses and ports, network
+interfaces, message queues, io_uring, user namespaces). For each, all
+simple_tests cases both accept and all 435 corpus profiles give the
+same file, attachment and policy automata, state for state, and the
+same permission table entries. upstream's simple_tests leave no
+refusal pending.
+
+**Cost:** each quirk has to be followed when upstream changes it.
+
+## ADR-037: The binary policy is upstream's values with tables of our own
+
+`binary::serialize` writes each profile, and each hat after its parent,
+as one unit with upstream's values in upstream's order
+(`parser_interface.c`): version, namespace, name, attachment automaton,
+flags, capabilities, path flags, the policy and file automata, the
+permission tables, the exec transition table and, for kernels without
+network mediation in the policy automaton, the old network table.
+`kernel::Securityfs` hands the units to `.load` or `.replace`, one write
+each, removes by fully qualified name through `.remove`, and reads the
+`profiles` list back.
+
+**Tables packed differently.** Upstream compresses transitions with
+difference encoding and no byte classes. Here every automaton carries
+an equivalence class table, each state keeps the target most of its
+classes go to as its default, and the rest are packed into the shared
+`next`/`check` arrays first fit. The kernel has always accepted
+equivalence tables and walks both packings the same way. Byte equality
+with upstream would mean porting its packing heuristics as well, and
+the bytes are not what the kernel enforces; the automata are.
+
+**Behaviour kept from upstream:** an automaton with 65,535 states or
+more is refused, because upstream's tables index states in 16 bits; the
+attachment automaton never uses the permission table even when the
+kernel has one; the old network table belongs to the whole file, not
+to a profile, so a profile without network rules after one with them
+is written with the earlier profile's table, and the table is dropped
+whenever upstream frees it (at the end of a block and of an `if`
+branch). Policy is written uncompressed; ADR-032 left zstd out.
+
+**The exec attribute.** `kernel::ExecTransition` is prepared in the
+parent: the bytes `exec <profile>` and the files to try, chosen as
+libapparmor chooses them (`proc_attr_base_init_once` and
+`procattr_open`): AppArmor's own `attr/apparmor/exec` when its directory
+is there, the shared `attr/exec` only as a fallback when opening the
+first fails and the module does not say it is disabled. The choice is a
+pure function of three probes so that every branch of libapparmor's is
+a unit test. Paths are relative to procfs and use `thread-self`.
+
+**Rejected:** writing all units in one write when the kernel has
+`policy/set_load`. `apparmor_parser -r` writes one profile per write
+too, and that works on every kernel.
+
+**Checked by:** `tests/apparmor_diff.rs` decodes what both write, as the
+kernel's unpacker would, and compares every value outside the
+automata and every automaton state for state, for all simple_tests
+cases and the 435 corpus profiles on three feature sets (53,100 cases
+each, none differ). `tests/apparmor_kernel.rs` loads compiled profiles
+into the kernel of a GitHub Ubuntu runner, starts a copy of itself under
+each through the exec attribute, and checks the label, file reads and
+writes allowed and refused, TCP connect allowed and refused, `chown`
+with and without the capability, and signals to a peer allowed and
+refused, and that the bare RuntimeDefault profile keeps writes out of
+`/proc/sys`; once against upstream's default abi, which uses the old
+network table, and once against the runner kernel's own features. It
+also checks that a second `.load` of a name fails with EEXIST, that
+every unit is listed in enforce mode, and that `.remove` takes them
+all away.
+
+**Cost:** a kernel that one day stops accepting byte class tables would
+need upstream's packing; the kernel test would show it first.
+
+## ADR-038: RuntimeDefault is containerd's profile, rendered the same way
+
+`runtime_default::RuntimeDefault` is containerd's default container
+profile (its `contrib/apparmor/template.go` at the commit the corpus
+pins, Apache 2.0): the same template inputs, rendered byte for byte as
+Go's template engine renders them. `for_host` asks a resolver what
+containerd asks the host (`abi/3.0`, `tunables/global`,
+`abstractions/base` in the profile directory) and reads the daemon's
+label as containerd does; `bare` is the rendering on a host without a
+profile directory, which needs no file at all.
+
+**Why containerd's and not CRI-O's or Docker's.** Kubernetes leaves the
+meaning of `RuntimeDefault` to the runtime, and containerd is the
+runtime most clusters run, so a pod moved from a containerd node to a
+QuantyKube node keeps its confinement. CRI-O's profile lets `podman`
+and fewer peers signal, allows less `ptrace`, and does not deny
+`/proc/mem`, `/proc/kmem` or powercap; Docker's adds `deny network`
+rules for old address families and also leaves `/proc/mem` and
+`/proc/kmem` open.
+
+**Rejected:** shipping upstream's `abstractions/base` inside the crate,
+so that the host profile would not depend on the host. It is GPL-2.0
+and this crate is Apache 2.0; and containerd itself uses the host's
+copy, so the host's copy is what equivalence means.
+
+**Checked by:** `tests/apparmor_corpus.rs` renders both variants and
+compares them byte for byte with what the corpus script rendered with
+containerd's own template; `tests/apparmor_diff.rs` compiles those two
+files and compares the automata with upstream's.
+
+**Cost:** containerd changes its template now and then; the corpus pin
+has to move with it, and the comparison shows where.

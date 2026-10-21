@@ -67,3 +67,29 @@ fn corpus() {
     );
     assert!(failed.is_empty(), "{} real profiles refused", failed.len());
 }
+
+/// The built-in RuntimeDefault is byte for byte what containerd renders,
+/// on a host with the profile directory and on one without; the profiles
+/// containerd renders are in the corpus and compared with upstream's
+/// automata by apparmor_diff.
+#[test]
+fn runtime_default_is_containerds() {
+    use quantycore::apparmor::runtime_default::{RuntimeDefault, NAME};
+    let Some(corpus) = std::env::var_os("QUANTY_APPARMOR_CORPUS") else {
+        if std::env::var_os("QUANTY_VECTORS_REQUIRED").is_some() {
+            panic!("QUANTY_APPARMOR_CORPUS not set but QUANTY_VECTORS_REQUIRED is");
+        }
+        eprintln!("QUANTY_APPARMOR_CORPUS not set, skipping");
+        return;
+    };
+    let base = PathBuf::from(corpus).join("containers/etc/apparmor.d");
+    let mut resolver = FsResolver::new(vec![base.clone()], base.clone());
+    let host = RuntimeDefault::for_host(&mut resolver, NAME, None);
+    let want = std::fs::read_to_string(base.join(NAME)).unwrap();
+    assert_eq!(host.render(), want);
+    let want = std::fs::read_to_string(base.join("containerd-bare")).unwrap();
+    assert_eq!(RuntimeDefault::bare("containerd-bare").render(), want);
+    let p = host.compile(&mut resolver, &Options::default()).unwrap();
+    assert_eq!(p.profiles.len(), 1);
+    eprintln!("2 renderings equal to containerd's");
+}

@@ -218,3 +218,40 @@ jobs:
           QUANTY_APPARMOR_CORPUS: ${{ runner.temp }}/corpus
           QUANTY_APPARMOR_PARSER: ${{ runner.temp }}/apparmor/parser/apparmor_parser
           LD_LIBRARY_PATH: ${{ runner.temp }}/apparmor/libraries/libapparmor/src/.libs
+
+  apparmor-kernel:
+    name: AppArmor policy in a real kernel
+    runs-on: ubuntu-24.04
+    env:
+      QUANTY_VECTORS_REQUIRED: 1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.0
+      - name: AppArmor is enabled
+        run: |
+          cat /sys/module/apparmor/parameters/enabled
+          sudo cat /sys/kernel/security/apparmor/features/policy/versions/* || true
+          uname -r
+      - name: load, confine, check, remove
+        run: cargo test --release --test apparmor_kernel -- --nocapture --test-threads 1
+        env:
+          QUANTY_APPARMOR_KERNEL: 1
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo -E
+
+  apparmor-fuzz:
+    name: AppArmor compiler fuzzed
+    runs-on: ubuntu-latest
+    env:
+      APPARMOR_COMMIT: 909affc32a13d14ae3a7ccf44d325ae63ce11baf
+      QUANTY_VECTORS_REQUIRED: 1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.0
+      - name: fetch upstream's test profiles at a pinned commit
+        run: tests/apparmor_fetch.sh "$RUNNER_TEMP/apparmor"
+      - name: 60,000 cases per target
+        run: cargo test --release --test apparmor_fuzz -- --nocapture
+        env:
+          QUANTY_APPARMOR_TST: ${{ runner.temp }}/apparmor/parser/tst
+          QUANTY_FUZZ_SEED: ${{ github.run_id }}
+          QUANTY_FUZZ_ITERS: 60000

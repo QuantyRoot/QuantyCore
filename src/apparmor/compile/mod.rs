@@ -3,6 +3,7 @@
 
 pub mod aare;
 pub mod dfa;
+pub mod kperms;
 pub mod regex;
 pub mod rules;
 pub mod tree;
@@ -24,6 +25,41 @@ pub struct Support {
     /// 0 when the kernel takes permissions in the accept tables.
     pub permstable32_version: u32,
     pub limits: Limits,
+    /// The kernel has a policy automaton at all.
+    pub policydb: bool,
+    /// The newest policy version the kernel takes, 5 to 7.
+    pub abi_version: u32,
+    pub network: bool,
+    pub networkv8: bool,
+    pub networkv9: bool,
+    pub networkv9_skb: bool,
+    pub ifacev9_skb: bool,
+    pub inetv8: bool,
+    pub inetv9: bool,
+    pub unixv7: bool,
+    pub unixv9: bool,
+    pub mount: bool,
+    pub detached_mount: bool,
+    pub dbus: bool,
+    pub signal: bool,
+    pub ptrace: bool,
+    pub userns: bool,
+    pub posix_mqueue: bool,
+    pub sysv_mqueue: bool,
+    pub io_uring: bool,
+    pub flag_interruptible: bool,
+    pub flag_signal: bool,
+    pub flag_error: bool,
+    pub flag_disconnected_ipc: bool,
+    pub identity_names: bool,
+}
+
+impl Support {
+    /// Whether network rules go into the policy automaton rather than
+    /// the per family table older kernels take.
+    pub fn network_policydb(&self) -> bool {
+        self.networkv8 || self.networkv9
+    }
 }
 
 impl Default for Support {
@@ -34,6 +70,31 @@ impl Default for Support {
             oob: false,
             permstable32_version: 0,
             limits: Limits::default(),
+            policydb: true,
+            abi_version: 7,
+            network: true,
+            networkv8: false,
+            networkv9: false,
+            networkv9_skb: false,
+            ifacev9_skb: false,
+            inetv8: false,
+            inetv9: false,
+            unixv7: true,
+            unixv9: false,
+            mount: true,
+            detached_mount: false,
+            dbus: true,
+            signal: true,
+            ptrace: true,
+            userns: false,
+            posix_mqueue: false,
+            sysv_mqueue: false,
+            io_uring: false,
+            flag_interruptible: false,
+            flag_signal: false,
+            flag_error: false,
+            flag_disconnected_ipc: false,
+            identity_names: false,
         }
     }
 }
@@ -147,6 +208,105 @@ pub fn file_dfa(prof: &mut Profile, s: &Support) -> Result<Option<Dfa>, String> 
     set.build(true, true, s.limits)
         .map(|(d, _)| Some(d))
         .map_err(|e| dfa_error(e, "file rules"))
+}
+
+/// upstream's mediates rules: one per class the kernel should mediate
+/// for this profile, so the kernel finds a state where the class byte
+/// leads.
+fn mediates(prof: &Profile, s: &Support, set: &mut RuleSet) -> Result<(), String> {
+    use crate::apparmor::class::*;
+    let bad = |_| "bad regular expression in mediates rule".to_string();
+    let add = |class: &str, priority: i32, set: &mut RuleSet| {
+        set.add(class.as_bytes(), priority, RuleMode::Allow, MAY_READ, 0)
+            .map_err(bad)
+    };
+    let d = |c: u32| format!("\\d{c}");
+    let sub = |c: u32, sub: u32| format!("\\d{c}\\000{sub}");
+    const AF_UNIX: u32 = 1;
+    if s.userns {
+        add(&d(CLASS_NS), MIN_INTERNAL_PRIORITY, set)?;
+    }
+    if prof.flags.mode == Mode::Unconfined || prof.flags.mode == Mode::DefaultAllow {
+        return Ok(());
+    }
+    let top = MAX_INTERNAL_PRIORITY;
+    if s.abi_version > 5 {
+        add(&d(CLASS_FILE), top, set)?;
+    }
+    if s.mount {
+        add(&d(CLASS_MOUNT), top, set)?;
+    }
+    if s.dbus {
+        add(&d(CLASS_DBUS), top, set)?;
+    }
+    if s.signal {
+        add(&d(CLASS_SIGNAL), top, set)?;
+    }
+    if s.ptrace {
+        add(&d(CLASS_PTRACE), top, set)?;
+    }
+    if s.networkv8 {
+        add(&d(CLASS_NETV8), top, set)?;
+    }
+    if s.networkv9_skb {
+        add(&d(CLASS_NETV9_SKB), top, set)?;
+    }
+    // upstream writes these as `if (v9 && (!add || !add)) goto out;
+    // else if (v7 && ...)`: the else follows every successful v9 add,
+    // so a kernel with both gets both.
+    if s.unixv9 {
+        add(&d(CLASS_NETV9), top, set)?;
+        add(&sub(CLASS_NETV9, AF_UNIX), top, set)?;
+    }
+    if s.unixv7 {
+        add(&d(CLASS_NET), top, set)?;
+        add(&sub(CLASS_NET, AF_UNIX), top, set)?;
+    }
+    if s.posix_mqueue {
+        add(&d(CLASS_POSIX_MQUEUE), top, set)?;
+    }
+    if s.sysv_mqueue {
+        add(&d(CLASS_SYSV_MQUEUE), top, set)?;
+    }
+    if s.io_uring {
+        add(&d(CLASS_IO_URING), MIN_INTERNAL_PRIORITY, set)?;
+    }
+    Ok(())
+}
+
+/// The policy automaton: every class rule, then the mediates rules.
+/// An error names the rule it came from when there is one.
+pub fn policydb(
+    prof: &mut Profile,
+    s: &Support,
+    net: &mut Option<crate::apparmor::binary::NetTable>,
+) -> Result<Option<Dfa>, (String, Option<crate::apparmor::source::Span>)> {
+    use crate::apparmor::class::ClassRule;
+    let mut set = RuleSet::default();
+    for r in &prof.rules {
+        if let PolicyRule::Class { rule, span } = r {
+            let at = |m| (m, Some(*span));
+            if let ClassRule::Unix(u) = &**rule {
+                // A unix rule always adds its downgraded network rule,
+                // whether or not the kernel mediates unix sockets.
+                u.downgrade_table(net);
+                if let Some(n) = u.downgraded().map_err(at)? {
+                    if !s.network_policydb() {
+                        n.update_compat(net);
+                    }
+                    n.gen(&mut set, s).map_err(at)?;
+                }
+            }
+            rule.gen(&mut set, s).map_err(at)?;
+        }
+    }
+    mediates(prof, s, &mut set).map_err(|m| (m, None))?;
+    if set.is_empty() {
+        return Ok(None);
+    }
+    set.build(false, true, s.limits)
+        .map(|(d, _)| Some(d))
+        .map_err(|e| (dfa_error(e, "policy rules"), None))
 }
 
 /// The automaton the kernel matches executables against to pick this

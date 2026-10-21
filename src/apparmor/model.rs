@@ -231,14 +231,16 @@ impl Entry {
     }
 }
 
-/// The rule kinds compiled into the policy automaton. Each is filled in
-/// by its own module.
+/// A profile's namespace and name, the key it is found by.
+pub type ProfileKey = (Option<Vec<u8>>, Vec<u8>);
+
+/// The rules compiled into the policy automaton.
 #[derive(Debug, Clone)]
 pub enum PolicyRule {
-    /// Parsed and kept for the stage that builds it.
-    Pending {
-        rule: ast::Rule,
-        prefix: Prefix,
+    /// `all`, whose implied rules are added after the profile is parsed.
+    All { prefix: Prefix, span: Span },
+    Class {
+        rule: Box<super::class::ClassRule>,
         span: Span,
     },
 }
@@ -258,13 +260,14 @@ pub struct Profile {
     pub entries: VecDeque<Entry>,
     pub rules: Vec<PolicyRule>,
     /// Hats and child profiles, ordered by namespace then name.
-    pub hats: BTreeMap<(Option<Vec<u8>>, Vec<u8>), Profile>,
+    pub hats: BTreeMap<ProfileKey, Box<Profile>>,
     pub exec_table: [Option<Vec<u8>>; perm::EXEC_COUNT],
     pub uses_prompt: bool,
     pub span: Span,
     /// Filled in by the compiler.
     pub xmatch: Option<(super::compile::dfa::Dfa, usize)>,
     pub file_dfa: Option<super::compile::dfa::Dfa>,
+    pub policydb: Option<super::compile::dfa::Dfa>,
 }
 
 impl Profile {
@@ -287,6 +290,7 @@ impl Profile {
             span,
             xmatch: None,
             file_dfa: None,
+            policydb: None,
         }
     }
 
@@ -306,6 +310,12 @@ impl Profile {
 #[derive(Debug, Clone, Default)]
 pub struct Policy {
     /// Top level profiles, ordered by namespace then name.
-    pub profiles: BTreeMap<(Option<Vec<u8>>, Vec<u8>), Profile>,
+    pub profiles: BTreeMap<ProfileKey, Profile>,
     pub aliases: Vec<(Vec<u8>, Vec<u8>)>,
+    /// The per family socket table kernels without network rules in the
+    /// policy automaton take. upstream keeps one for the whole file, not
+    /// one per profile, and every profile carries it.
+    pub net_table: Option<super::binary::NetTable>,
+    /// What the policy was compiled for.
+    pub support: super::compile::Support,
 }

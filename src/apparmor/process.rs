@@ -7,11 +7,82 @@ use super::eval::Symtab;
 use super::model::{perm::*, *};
 use super::source::{Error, Sources};
 
+/// The class rules an `all` rule implies, each given the `all` rule's
+/// prefix once more through add_prefix, whose errors upstream ignores.
+fn implied_class_rules(p: &Prefix) -> Result<Vec<super::class::ClassRule>, String> {
+    use super::class::*;
+    let fail = |m: String| m;
+    let with = |mut h: Head| {
+        if let Ok(np) = add_prefix(h.prefix, *p) {
+            h.prefix = np;
+        }
+        h
+    };
+    let mut out = Vec::new();
+    let mut u = unix::Unix::implied(u32::MAX, p.audit, p.mode).map_err(fail)?;
+    u.head = with(u.head);
+    out.push(ClassRule::Unix(u));
+    let mut d = dbus::Dbus::new(&None, &[], &None, Prefix::default()).map_err(fail)?;
+    d.head = with(Head {
+        prefix: Prefix::default(),
+        perms: d.head.perms,
+    });
+    out.push(ClassRule::Dbus(d));
+    let mut i = io_uring::IoUring::new(&None, &[], &None, Prefix::default()).map_err(fail)?;
+    i.head = with(Head {
+        prefix: Prefix::default(),
+        perms: i.head.perms,
+    });
+    out.push(ClassRule::IoUring(i));
+    let mut m = mqueue::Mqueue::new(&None, &[], &None, Prefix::default()).map_err(fail)?;
+    m.head = with(Head {
+        prefix: Prefix::default(),
+        perms: m.head.perms,
+    });
+    out.push(ClassRule::Mqueue(m));
+    let mut t = ptrace::Ptrace::new(&None, &[], Prefix::default()).map_err(fail)?;
+    t.head = with(Head {
+        prefix: Prefix::default(),
+        perms: t.head.perms,
+    });
+    out.push(ClassRule::Ptrace(t));
+    let mut sg = signal::Signal::new(&None, &[], Prefix::default()).map_err(fail)?;
+    sg.head = with(Head {
+        prefix: Prefix::default(),
+        perms: sg.head.perms,
+    });
+    out.push(ClassRule::Signal(sg));
+    let mut us = userns::Userns::new(&None, &[], Prefix::default()).map_err(fail)?;
+    us.head = with(Head {
+        prefix: Prefix::default(),
+        perms: us.head.perms,
+    });
+    out.push(ClassRule::Userns(us));
+    for kind in [
+        crate::apparmor::ast::MountKind::Mount,
+        crate::apparmor::ast::MountKind::Remount,
+        crate::apparmor::ast::MountKind::Umount,
+        crate::apparmor::ast::MountKind::PivotRoot,
+    ] {
+        let mut m = mount::Mount::parse(kind, &[], &None, &None, &None).map_err(fail)?;
+        m.head = with(m.head);
+        out.push(ClassRule::Mount(m));
+    }
+    let mut n = network::Network::parse(0, &[], &[], &None).map_err(fail)?;
+    if let Ok(np) = add_prefix(n.head.prefix, *p) {
+        n.head.prefix = np;
+    }
+    out.push(ClassRule::Network(n));
+    Ok(out)
+}
+
 pub(crate) struct Processor<'s> {
     pub sources: &'s Sources,
     pub symtab: Symtab,
     pub aliases: Vec<(Vec<u8>, Vec<u8>)>,
     pub support: super::compile::Support,
+    /// upstream's per family network table, shared by the whole file.
+    pub net: Option<super::binary::NetTable>,
 }
 
 /// Upstream's filter_slashes: runs of slashes become one, except that a
@@ -84,27 +155,23 @@ impl Processor<'_> {
         aliases.dedup();
         self.aliases = aliases;
         for prof in policy.profiles.values_mut() {
-            self.profile(prof, &[])?;
+            self.tree(prof)?;
         }
         Ok(())
     }
 
-    /// What an `all` rule implies here: every file permission but exec,
+    /// What an `all` rule implies: every file permission but exec,
     /// inherit execution two priorities lower so that any other exec
-    /// rule wins, and every capability. The rule's prefix is applied
-    /// twice, once when the rule is made and once to each implied rule,
-    /// so `deny all` ends up unquieted and `audit deny all` quieted. The rule kinds compiled into the
-    /// policy automaton are implied when those kinds are compiled.
+    /// rule wins, every capability, and a rule of every kind in the
+    /// policy automaton. The rule's prefix is applied twice, once when
+    /// the rule is made and once to each implied rule, so `deny all`
+    /// ends up unquieted and `audit deny all` quieted.
     fn all_rules(&mut self, prof: &mut Profile) -> R<()> {
         let alls: Vec<(Prefix, super::source::Span)> = prof
             .rules
             .iter()
             .filter_map(|r| match r {
-                PolicyRule::Pending {
-                    rule: super::ast::Rule::All,
-                    prefix,
-                    span,
-                } => Some((*prefix, *span)),
+                PolicyRule::All { prefix, span } => Some((*prefix, *span)),
                 _ => None,
             })
             .collect();
@@ -134,6 +201,17 @@ impl Processor<'_> {
                 .map_err(|m| self.sources.error_at(span, m))?;
             prof.add_entry(e);
 
+            for rule in implied_class_rules(&p).map_err(|m| self.sources.error_at(span, m))? {
+                if let (super::class::ClassRule::Network(n), false) =
+                    (&rule, self.support.network_policydb())
+                {
+                    n.update_compat(&mut self.net);
+                }
+                prof.rules.push(PolicyRule::Class {
+                    rule: Box::new(rule),
+                    span,
+                });
+            }
             if deny {
                 prof.caps.deny |= u64::MAX;
                 if p.audit != Audit::Force {
@@ -147,6 +225,24 @@ impl Processor<'_> {
             }
         }
         Ok(())
+    }
+
+    fn merge_class_rules(&mut self, prof: &mut Profile) {
+        let mut class = Vec::new();
+        let mut rest = Vec::new();
+        for r in prof.rules.drain(..) {
+            match r {
+                PolicyRule::Class { rule, span } => class.push((*rule, span)),
+                other => rest.push(other),
+            }
+        }
+        super::class::merge_rules(&mut class);
+        prof.rules = rest;
+        prof.rules
+            .extend(class.into_iter().map(|(rule, span)| PolicyRule::Class {
+                rule: Box::new(rule),
+                span,
+            }));
     }
 
     fn profile(&mut self, prof: &mut Profile, parents: &[Vec<u8>]) -> R<()> {
@@ -175,15 +271,69 @@ impl Processor<'_> {
         self.variables(prof, parents)?;
         self.apply_aliases(prof);
         self.merge(prof)?;
+        self.merge_class_rules(prof);
         let span = prof.span;
         prof.xmatch = super::compile::xmatch(prof, &self.support)
             .map_err(|m| self.sources.error_at(span, m))?;
         prof.file_dfa = super::compile::file_dfa(prof, &self.support)
             .map_err(|m| self.sources.error_at(span, m))?;
-        let mut chain = parents.to_vec();
-        chain.push(prof.name.clone());
-        for hat in prof.hats.values_mut() {
-            self.profile(hat, &chain)?;
+        prof.policydb = super::compile::policydb(prof, &self.support, &mut self.net)
+            .map_err(|(m, at)| self.sources.error_at(at.unwrap_or(span), m))?;
+        Ok(())
+    }
+
+    /// A profile and, after it, each of its hats and child profiles in
+    /// name order, each before its own: upstream's order, from an
+    /// explicit stack since profiles nest as deep as the parser allows.
+    /// Hats are taken out while they are processed and put back after.
+    fn tree(&mut self, root: &mut Profile) -> R<()> {
+        type Key = super::model::ProfileKey;
+        struct Work {
+            hat: Box<Profile>,
+            parent: usize,
+            key: Key,
+            chain: Vec<Vec<u8>>,
+        }
+        const ROOT: usize = usize::MAX;
+        self.profile(root, &[])?;
+        let mut work: Vec<Work> = Vec::new();
+        let chain = vec![root.name.clone()];
+        for (key, hat) in std::mem::take(&mut root.hats).into_iter().rev() {
+            work.push(Work {
+                hat,
+                parent: ROOT,
+                key,
+                chain: chain.clone(),
+            });
+        }
+        let mut done: Vec<(Box<Profile>, usize, Key)> = Vec::new();
+        while let Some(Work {
+            mut hat,
+            parent,
+            key,
+            chain,
+        }) = work.pop()
+        {
+            self.profile(&mut hat, &chain)?;
+            let me = done.len();
+            let mut sub = chain.clone();
+            sub.push(hat.name.clone());
+            for (key, h) in std::mem::take(&mut hat.hats).into_iter().rev() {
+                work.push(Work {
+                    hat: h,
+                    parent: me,
+                    key,
+                    chain: sub.clone(),
+                });
+            }
+            done.push((hat, parent, key));
+        }
+        while let Some((hat, parent, key)) = done.pop() {
+            if parent == ROOT {
+                root.hats.insert(key, hat);
+            } else {
+                done[parent].0.hats.insert(key, hat);
+            }
         }
         Ok(())
     }
@@ -285,6 +435,17 @@ impl Processor<'_> {
                     .expand_alternation(l)
                     .map_err(|m| self.sources.error_at(e.span, m))?;
                 *l = n;
+            }
+        }
+        let symtab = &mut self.symtab;
+        for r in prof.rules.iter_mut() {
+            if let PolicyRule::Class { rule, span } = r {
+                let span = *span;
+                rule.expand(&mut |s: &mut Vec<u8>| {
+                    *s = symtab.expand_alternation(s)?;
+                    Ok(())
+                })
+                .map_err(|m| self.sources.error_at(span, m))?;
             }
         }
         Ok(())

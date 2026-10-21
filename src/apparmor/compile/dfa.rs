@@ -219,7 +219,7 @@ fn update_perm(
 #[derive(Clone, Debug)]
 pub struct Dfa {
     /// The class of each byte.
-    pub class: [u16; 256],
+    pub class: Box<[u16; 256]>,
     /// Byte classes; the out of band symbol is column `nclasses`.
     pub nclasses: usize,
     /// `states * (nclasses + 1)` targets.
@@ -576,7 +576,7 @@ pub fn build(
     drop(states);
 
     let dfa = Dfa {
-        class,
+        class: Box::new(class),
         nclasses,
         trans,
         perms,
