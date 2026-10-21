@@ -9,6 +9,12 @@ the pre-1.0 rule that a minor version may break anything.
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-10-21
+
+The license exception below, on the index. It holds for versions that
+contain the file, so this is the first version on crates.io it covers;
+nothing else changed since 0.1.1.
+
 ### Added
 
 - `LICENSE-QUANTYDB-EXCEPTION`: QuantyCore may be used under the MIT
@@ -63,6 +69,7 @@ standard library and nothing else (ADR-001), and has no `unsafe`.
   as `RuntimeDefault` (ADR-032 to ADR-039). Checked in a real kernel, by
   a fuzzer and by mutants. Unreviewed.
 
-[Unreleased]: https://github.com/QuantyRoot/QuantyCore/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/QuantyRoot/QuantyCore/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/QuantyRoot/QuantyCore/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/QuantyRoot/QuantyCore/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/QuantyRoot/QuantyCore/releases/tag/v0.1.0
