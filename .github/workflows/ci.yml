@@ -233,13 +233,15 @@ jobs:
           sudo find /sys/kernel/security/apparmor/features -maxdepth 2 | sort
           uname -r
       - name: load, confine, check, remove
-        run: cargo test --release --test apparmor_kernel -- --nocapture --test-threads 1
+        run: |
+          sudo sysctl -w kernel.printk_ratelimit=0 kernel.printk_ratelimit_burst=10000
+          cargo test --release --test apparmor_kernel -- --nocapture --test-threads 1
         env:
           QUANTY_APPARMOR_KERNEL: 1
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo -E
       - name: what the kernel refused
         if: always()
-        run: sudo dmesg | grep -i apparmor | tail -40
+        run: sudo dmesg | grep -i apparmor | grep -v STATUS | tail -40
 
   apparmor-fuzz:
     name: AppArmor compiler fuzzed
