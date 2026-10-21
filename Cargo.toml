@@ -1,12 +1,11 @@
 [package]
 name = "quantycore"
-version = "0.0.0"
+version = "0.1.0"
 edition = "2021"
 rust-version = "1.89"
 license = "Apache-2.0"
-description = "Shared foundations for Quanty projects"
+description = "Shared foundations of the Quanty projects: wire protocols, TLS and AppArmor, on the standard library alone"
 repository = "https://github.com/QuantyRoot/QuantyCore"
-publish = false
 
 # No [dependencies]. See ADR-001 in docs/DECISIONS.md before adding one.
 [dependencies]
