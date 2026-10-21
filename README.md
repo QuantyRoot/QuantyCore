@@ -22,6 +22,7 @@ on the Rust standard library.
 | JSON, strict RFC 8259 | built, tested |
 | HTTP/1.1 client for registries, blocking | built, tested |
 | TLS 1.3 and 1.2 (off by default) client and server, X25519MLKEM768, X.509 validation, issuance and requests (Ed25519, P-256, P-384, RSA), primitives | built, tested, unreviewed |
+| AppArmor: profile language, compiler, binary policy, loading through securityfs, exec transition, RuntimeDefault profile | built, tested, unreviewed |
 
 Planned means no code exists yet.
 
@@ -39,6 +40,22 @@ timing test, a fuzzer and deliberately broken code, but nobody else has
 reviewed it yet. It is unreviewed until the conditions in
 [ADR-003](docs/DECISIONS.md#adr-003-tls-is-written-here) are met. Do not
 rely on it for anything that matters before then.
+
+## AppArmor
+
+AppArmor is implemented here under `quantycore::apparmor`: the profile
+language of `apparmor.d(5)`, the compiler to the automata the kernel
+enforces, the binary policy, loading, replacing and removing it through
+securityfs, the profile for the next exec, and containerd's default
+container profile as `RuntimeDefault`. The reference is upstream's
+`apparmor_parser` 5.0.2; why and how is in
+[ADR-032](docs/DECISIONS.md#adr-032-apparmor-is-written-here) to ADR-038.
+
+It is checked against upstream's own parser tests, against the automata
+`apparmor_parser` writes for those tests and for 435 real profiles, in a
+real kernel, by a fuzzer and by deliberately broken code, but nobody else
+has reviewed it yet. It is unreviewed until then. Do not rely on it to
+confine anything that matters before that.
 
 ## Rules
 

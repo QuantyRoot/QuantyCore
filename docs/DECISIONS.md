@@ -1209,9 +1209,11 @@ each through the exec attribute, and checks the label, file reads and
 writes allowed and refused, TCP connect allowed and refused, `chown`
 with and without the capability, and signals to a peer allowed and
 refused, and that the bare RuntimeDefault profile keeps writes out of
-`/proc/sys`; once against upstream's default abi, which uses the old
-network table, and once against the runner kernel's own features. It
-also checks that a second `.load` of a name fails with EEXIST, that
+`/proc/sys`; once against the runner kernel's own features and once
+against upstream's default abi. The default abi puts network rules into
+the old network table, which mainline kernels do not read (the runner's
+kernel lets the connect through, as it would for upstream's policy), so
+a refused connect is checked only in the first run. It also checks that a second `.load` of a name fails with EEXIST, that
 every unit is listed in enforce mode, and that `.remove` takes them
 all away.
 

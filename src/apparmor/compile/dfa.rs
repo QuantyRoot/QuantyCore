@@ -751,6 +751,15 @@ mod tests {
         let p = dfa.perms[dfa.run(b"/bin/sh") as usize];
         assert_eq!(p.allow & EXEC_TYPE, EXEC_INHERIT);
         assert!(p.allow & OLD_EXEC_MMAP != 0, "ix implies m");
+        let exact_px = MatchInfo {
+            kind: Kind::Exact,
+            ..px
+        };
+        let root = Node::Alt(vec![rule("/bin/sh", 0), rule("/bin/sh", 1)]);
+        assert_eq!(
+            build(&root, &[exact_px, exact_ix], true, false, Limits::default()).unwrap_err(),
+            DfaError::ConflictingExec
+        );
     }
 
     #[test]
@@ -764,6 +773,19 @@ mod tests {
         };
         assert_eq!(
             build(&root, &[allow(MAY_READ)], true, false, limits).unwrap_err(),
+            DfaError::TooLarge
+        );
+        // Small enough for every other bound: only the state count stops it.
+        let re = format!("[^/\\x00]*a{}", "[^/\\x00]".repeat(8));
+        let root = rule(&re, 0);
+        let states = |max_states| Limits {
+            max_states,
+            ..Limits::default()
+        };
+        let p = [allow(MAY_READ)];
+        assert!(build(&root, &p, true, false, states(1 << 12)).is_ok());
+        assert_eq!(
+            build(&root, &p, true, false, states(50)).unwrap_err(),
             DfaError::TooLarge
         );
     }

@@ -181,3 +181,19 @@ impl Signal {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn realtime_signals_follow_upstreams_mapping() {
+        assert_eq!(mapping(b"rtmin+0"), Some(MINRT));
+        assert_eq!(mapping(b"rtmin+32"), Some(MINRT + 32));
+        assert_eq!(mapping(b"rtmin+33"), None);
+        assert_eq!(mapping(b"rtmin+"), Some(MINRT));
+        assert_eq!(mapping(b"rtmin+5x"), Some(MINRT + 5));
+        assert_eq!(mapping(b"hup"), Some(1));
+        assert_eq!(mapping(b"nosuch"), None);
+    }
+}

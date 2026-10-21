@@ -60,7 +60,7 @@ MUTANTS = [
         "src/apparmor/class/signal.rs",
         "(n <= MAXRT)",
         "(n < MAXRT)",
-        SIMPLE, "simple_tests", [TST],
+        UNIT, "realtime_signals_follow_upstreams_mapping", [],
     ),
     (
         "glob: ** stops at a slash",
@@ -88,7 +88,7 @@ MUTANTS = [
         "src/apparmor/compile/dfa.rs",
         "        Kind::Exact => {\n            if conflicts(p) {",
         "        Kind::Exact => {\n            if false && conflicts(p) {",
-        SIMPLE, "simple_tests", [TST],
+        UNIT, "different_exec_modifiers_on_overlapping_paths_conflict", [],
     ),
     (
         "dfa: ix no longer implies m",
@@ -154,10 +154,10 @@ MUTANTS = [
         UNIT, "attribute_choice_follows_libapparmor", [],
     ),
     (
-        "exec attribute: a hidden directory counts as missing",
+        "exec attribute: an unreadable parameter counts as disabled",
         "src/apparmor/kernel.rs",
-        "        Probe::Denied => {\n            present = 1;",
-        "        Probe::Denied => {\n            present = 0;",
+        "            Param::Unread(Probe::Denied) => {}\n",
+        "",
         UNIT, "attribute_choice_follows_libapparmor", [],
     ),
     (
