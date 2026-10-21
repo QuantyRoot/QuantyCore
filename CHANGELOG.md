@@ -28,7 +28,7 @@ the pre-1.0 rule that a minor version may break anything.
 
 - On Windows, TLS cannot generate keys or complete a handshake: there is
   no operating system randomness without `unsafe`, so it returns
-  `Unsupported` instead of using a weaker source (ADR-040). Everything
+  `Unsupported` instead of using a weaker source (ADR-041). Everything
   else works there.
 
 ### Added

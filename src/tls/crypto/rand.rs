@@ -18,12 +18,12 @@ use std::sync::OnceLock;
 static URANDOM: OnceLock<File> = OnceLock::new();
 
 /// Fills `buf` from the operating system. Only Unix has a file to read
-/// it from; elsewhere this is an error, never a weaker source (ADR-040).
+/// it from; elsewhere this is an error, never a weaker source (ADR-041).
 #[cfg(not(unix))]
 pub fn fill(_buf: &mut [u8]) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "no operating system randomness on this platform without unsafe (ADR-040)",
+        "no operating system randomness on this platform without unsafe (ADR-041)",
     ))
 }
 
@@ -44,7 +44,7 @@ mod tests {
     use super::*;
 
     #[test]
-    #[cfg_attr(not(unix), ignore = "needs operating system randomness (ADR-040)")]
+    #[cfg_attr(not(unix), ignore = "needs operating system randomness (ADR-041)")]
     fn two_draws_differ() {
         let (mut a, mut b) = ([0u8; 32], [0u8; 32]);
         fill(&mut a).unwrap();

@@ -150,7 +150,7 @@ mod tests {
     use crate::tls::crypto::ec::Curve;
 
     #[test]
-    #[cfg_attr(not(unix), ignore = "needs operating system randomness (ADR-040)")]
+    #[cfg_attr(not(unix), ignore = "needs operating system randomness (ADR-041)")]
     fn round_trip_and_a_forged_request() {
         let san = vec![
             SanEntry::Dns("node-1.cluster.test".into()),
@@ -196,7 +196,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(not(unix), ignore = "needs operating system randomness (ADR-040)")]
+    #[cfg_attr(not(unix), ignore = "needs operating system randomness (ADR-041)")]
     fn requests_with_bad_names_are_refused() {
         let key = PrivateKey::generate_ed25519().unwrap();
         let wildcard = request("w", &[SanEntry::Dns("*.cluster.test".into())], &key);

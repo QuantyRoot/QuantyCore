@@ -14,7 +14,7 @@
 //! The default run is short; CI runs a long one.
 
 // The corpus is built from fresh keys and handshakes, which need the
-// operating system's randomness (ADR-040).
+// operating system's randomness (ADR-041).
 #![cfg(unix)]
 
 use quantycore::tls::msgs;

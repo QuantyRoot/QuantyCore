@@ -1325,6 +1325,7 @@ that `cargo` and SPDX cannot express: `Cargo.toml` still says
 part of QuantyDB. The exception applies to every version that contains
 the file, so removing it later would only affect versions released after
 that.
+
 ## ADR-041: Every platform builds, and Unix-only parts say so
 
 0.1.0 reached crates.io without having been compiled anywhere but Linux.
@@ -1369,3 +1370,7 @@ is what builds everywhere.
 
 **Cost:** two more runners per push, and Windows paths that are not
 UTF-8 cannot be named in a profile.
+
+**Numbering.** The 0.1.1 package on crates.io was cut from a branch that
+did not yet have ADR-040 above, so the `docs/DECISIONS.md` inside it, and
+its messages, call this decision ADR-040. It is the same decision.
