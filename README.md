@@ -79,4 +79,9 @@ Rust 1.89 or newer.
 
 Apache License 2.0, see [LICENSE](LICENSE).
 
+As part of [QuantyDB](https://github.com/QuantyRoot/QuantyDatabase),
+QuantyCore may also be used under the MIT License. That permission covers
+QuantyCore inside QuantyDB and nothing else; see
+[LICENSE-QUANTYDB-EXCEPTION](LICENSE-QUANTYDB-EXCEPTION) and ADR-040.
+
 QuantyCore is a project by Elchi Studios.

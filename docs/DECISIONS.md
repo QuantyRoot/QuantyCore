@@ -30,6 +30,7 @@ through and add a new entry, never silently edit history.
 - [ADR-037](#adr-037-the-binary-policy-is-upstreams-values-with-tables-of-our-own) The binary policy is upstream's values with tables of our own
 - [ADR-038](#adr-038-runtimedefault-is-containerds-profile-rendered-the-same-way) RuntimeDefault is containerd's profile, rendered the same way
 - [ADR-039](#adr-039-what-the-first-outside-review-found-and-what-changed) What the first outside review found, and what changed
+- [ADR-040](#adr-040-quantydb-may-use-quantycore-under-mit-and-only-quantydb) QuantyDB may use QuantyCore under MIT, and only QuantyDB
 
 ## ADR-001: Nothing outside the standard library, and QuantyRoot is not outside
 
@@ -1294,3 +1295,32 @@ hold.
 **Checked by:** the new unit tests and mutants, the corpus and
 simple_tests differentials against upstream after the minimizer change,
 and a debug build fuzz run of four seeds.
+
+## ADR-040: QuantyDB may use QuantyCore under MIT, and only QuantyDB
+
+QuantyCore is Apache 2.0 (ADR-005) and QuantyDB is MIT. From QuantyDB
+0.5.0 on its command line tool contains QuantyCore's TLS, so every QuantyDB
+binary carries Apache 2.0 code inside an MIT program. That is allowed,
+but it means anyone passing QuantyDB on owes QuantyCore's license text
+and notices as well as QuantyDB's, which is not what an MIT project
+promises the people who use it.
+
+`LICENSE-QUANTYDB-EXCEPTION` adds one permission: QuantyCore may be used
+under the MIT License as part of QuantyDB. Apache 2.0 stays the license
+of QuantyCore everywhere else, and stays available inside QuantyDB too.
+
+**Why the permission travels with QuantyDB and with nothing else.** A
+permission that stopped at QuantyDB's own repository would be useless:
+the first distribution to package QuantyDB, or the first fork, would be
+holding QuantyCore without it. So whoever receives QuantyDB receives the
+permission for the QuantyCore inside it. What does not travel is
+QuantyCore on its own. Lifted out of QuantyDB into anything else, it is
+Apache 2.0 again, so the exception cannot be used as a way to get an MIT
+TLS library.
+
+**What it costs.** A second license file to keep correct, and a license
+that `cargo` and SPDX cannot express: `Cargo.toml` still says
+`Apache-2.0`, which is true for everyone who is not using QuantyCore as
+part of QuantyDB. The exception applies to every version that contains
+the file, so removing it later would only affect versions released after
+that.

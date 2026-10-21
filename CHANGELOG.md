@@ -9,6 +9,12 @@ the pre-1.0 rule that a minor version may break anything.
 
 ## [Unreleased]
 
+### Added
+
+- `LICENSE-QUANTYDB-EXCEPTION`: QuantyCore may be used under the MIT
+  License as part of QuantyDB, and only as part of it. Apache 2.0 remains
+  the license everywhere else (ADR-040).
+
 ## [0.1.0] - 2026-10-21
 
 The first release on crates.io. Everything below depends on the Rust

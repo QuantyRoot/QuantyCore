@@ -1,0 +1,74 @@
+QuantyDB Exception to the Apache License, Version 2.0
+
+Copyright (c) 2026 Elchi Studios
+
+QuantyCore is licensed under the Apache License, Version 2.0 (the file
+LICENSE). As the copyright holder of QuantyCore, Elchi Studios grants the
+following additional permission. It adds to the Apache License and takes
+nothing away from it.
+
+1. Permission
+
+   You may use, copy, modify, merge, publish, distribute, sublicense and
+   sell QuantyCore under the terms of the MIT License reproduced below,
+   instead of the Apache License, but only as part of QuantyDB.
+
+2. What "as part of QuantyDB" means
+
+   QuantyDB is the database published by Elchi Studios at
+   https://github.com/QuantyRoot/QuantyDatabase.
+
+   QuantyCore, or a modified version of it, is used as part of QuantyDB
+   when it is built into, linked into or distributed with QuantyDB, or
+   with a work based on QuantyDB, for that work to function. That covers
+   compiled programs of QuantyDB, its packages, and source distributions
+   of QuantyDB that include QuantyCore.
+
+3. Limits
+
+   a. The permission does not cover QuantyCore used on its own or as part
+      of any other work. Taking QuantyCore, or any part of it, out of
+      QuantyDB to use it elsewhere is governed by the Apache License alone.
+
+   b. The permission cannot be transferred separately from QuantyDB.
+      Anyone who receives QuantyDB, or a work based on QuantyDB, receives
+      this permission for the QuantyCore it contains and for that use
+      only, so that QuantyDB itself can be passed on under the MIT License.
+
+   c. The permission does not grant any right to the names or trademarks
+      of Elchi Studios, QuantyDB or QuantyCore.
+
+4. The Apache License remains available
+
+   You may always use QuantyCore under the Apache License, Version 2.0
+   instead, including as part of QuantyDB.
+
+5. Which versions
+
+   This exception applies to every version of QuantyCore that contains
+   this file.
+
+----------------------------------------------------------------------
+
+MIT License
+
+Copyright (c) 2026 Elchi Studios
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the
+"Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to permit
+persons to whom the Software is furnished to do so, subject to the
+following conditions:
+
+The above copyright notice and this permission notice shall be included
+in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
+NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+USE OR OTHER DEALINGS IN THE SOFTWARE.
