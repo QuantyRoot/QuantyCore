@@ -150,7 +150,9 @@ impl Run {
 
 fn profiles_text(tag: &str, dir: &Path) -> String {
     let d = dir.display();
-    let base = "/** rwlkmix,";
+    // The test binary sits under the runner's home directory, which root
+    // walks into only with these two capabilities.
+    let base = "/** rwlkmix,\n  capability dac_override dac_read_search,";
     format!(
         "profile quanty_aa_files_{tag} {{\n  {base}\n  deny {d}/secret r,\n  deny {d}/ro w,\n}}\n\
          profile quanty_aa_net_allow_{tag} {{\n  {base}\n  network inet stream,\n}}\n\
