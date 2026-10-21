@@ -65,7 +65,9 @@ confine anything that matters before that.
 - Every decision that might be regretted later is recorded in
   [docs/DECISIONS.md](docs/DECISIONS.md), including what was rejected.
 
-## Building
+## Using and building
+
+As a library: `cargo add quantycore`. From a checkout:
 
 ```
 cargo test
